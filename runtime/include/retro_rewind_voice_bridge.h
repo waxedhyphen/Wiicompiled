@@ -37,6 +37,7 @@ struct RoomPlayer {
 struct RoomSnapshot {
     bool lookupInFlight = false;
     bool lookupComplete = false;
+    bool lookupSucceeded = false;
     bool roomFound = false;
     std::string status;
     std::string profileId;
