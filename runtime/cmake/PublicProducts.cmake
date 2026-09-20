@@ -203,6 +203,9 @@ function(mkw_configure_product target)
 
     target_link_libraries(${target} PRIVATE
         aurora::gx aurora::pad aurora::si aurora::vi aurora::mtx)
+    if(TARGET mkw_voicechat_core_stage1)
+        target_link_libraries(${target} PRIVATE mkw_voicechat_core_stage1)
+    endif()
     if(MKW_PLATFORM_MACOS)
         target_link_libraries(${target} PRIVATE
             "${MKW_IOKIT_FRAMEWORK}" "${MKW_COREFOUNDATION_FRAMEWORK}")
