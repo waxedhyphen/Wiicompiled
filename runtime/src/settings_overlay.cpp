@@ -964,6 +964,9 @@ void DrawVoiceChatSettings() {
 
     ImGui::SeparatorText("Voice room");
     ImGui::Text("Local RKNet room: %s", room.localRoomActive ? "Active" : "Inactive");
+    ImGui::Text("Signaling socket: %s", room.signalingConnected ? "Connected" : "Not connected");
+    ImGui::Text("Presence frame: %s", room.presenceFrameSent ? "Sent" : "Not sent");
+    ImGui::Text("Worker reply: %s", room.signalingReplyReceived ? "Received" : "Waiting");
     ImGui::Text("Lookup: %s", room.status.empty() ? "-" : room.status.c_str());
     if (room.roomFound) {
         ImGui::Text("Room ID: %s", room.roomId.c_str());
