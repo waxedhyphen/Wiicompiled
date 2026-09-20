@@ -7,6 +7,8 @@
 #include <cctype>
 #include <charconv>
 #include <chrono>
+#include <atomic>
+#include <condition_variable>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -45,11 +47,17 @@ constexpr unsigned kRoomLeaveConfirmations = 3;
 
 struct RoomLookupState {
     std::mutex mutex;
+    std::condition_variable wake;
     RoomSnapshot snapshot;
     std::uint64_t observedIdentityGeneration = UINT64_MAX;
-    std::uint64_t lookupToken = 0;
+    std::uint64_t desiredIdentityGeneration = 0;
+    std::uint64_t workerIdentityGeneration = UINT64_MAX;
+    std::string desiredProfileId;
+    bool desiredOnline = false;
+    bool workerRunning = false;
+    bool manualRefreshRequested = false;
     unsigned consecutiveRoomMisses = 0;
-    std::chrono::steady_clock::time_point nextAutomaticLookup{};
+    std::chrono::steady_clock::time_point nextReconnectAttempt{};
 };
 
 RoomLookupState& RoomState() {
@@ -258,7 +266,6 @@ RoomSnapshot ParseRoomReply(const std::string& message, std::string_view expecte
         return result;
     }
 
-    result.lookupSucceeded = true;
     result.profileId = lines[0];
     result.roomId = lines[1];
     result.roomInstanceId = lines[2];
@@ -278,8 +285,10 @@ RoomSnapshot ParseRoomReply(const std::string& message, std::string_view expecte
         if (first == std::string::npos || second == std::string::npos) {
             continue;
         }
+
         RoomPlayer player;
         player.profileId = line.substr(0, first);
+        player.voiceChat = line.substr(first + 1, second - first - 1) == "1";
         player.name = DecodeHex(std::string_view(line).substr(second + 1));
         if (player.name.empty()) {
             player.name = "Player";
@@ -289,11 +298,21 @@ RoomSnapshot ParseRoomReply(const std::string& message, std::string_view expecte
         }
     }
 
+    if (result.players.size() != expectedPlayers) {
+        result.status = "Incomplete Retro Rewind roster response";
+        return result;
+    }
+
+    // From here on the Worker reply was structurally valid. An empty room is a
+    // real negative roster result, not a transport/parser failure.
+    result.lookupSucceeded = true;
+
     if (result.roomId.empty()) {
         result.status = "Online, but not currently present in a public RR room";
         return result;
     }
-    if (result.roomInstanceId.empty() || result.created.empty() || result.players.size() != expectedPlayers) {
+    if (result.roomInstanceId.empty() || result.created.empty()) {
+        result.lookupSucceeded = false;
         result.status = "Incomplete Retro Rewind room response";
         return result;
     }
@@ -304,6 +323,9 @@ RoomSnapshot ParseRoomReply(const std::string& message, std::string_view expecte
 }
 
 #if defined(_WIN32)
+
+constexpr auto kRoomPresenceRefreshInterval = std::chrono::seconds(30);
+constexpr auto kRoomReconnectDelay = std::chrono::seconds(5);
 
 std::string WinHttpError(const char* operation, DWORD error = GetLastError()) {
     return std::string(operation) + " failed (WinHTTP " + std::to_string(error) + ")";
@@ -316,34 +338,164 @@ struct WinHttpHandle {
     WinHttpHandle(const WinHttpHandle&) = delete;
     WinHttpHandle& operator=(const WinHttpHandle&) = delete;
     WinHttpHandle(WinHttpHandle&& other) noexcept : value(std::exchange(other.value, nullptr)) {}
+    WinHttpHandle& operator=(WinHttpHandle&& other) noexcept {
+        if (this != &other) {
+            if (value) WinHttpCloseHandle(value);
+            value = std::exchange(other.value, nullptr);
+        }
+        return *this;
+    }
     ~WinHttpHandle() {
         if (value) WinHttpCloseHandle(value);
     }
 };
 
-RoomSnapshot LookupRoomViaSignalingWorker(const std::string& profileId) {
+DWORD SendWebSocketText(HINTERNET socket, const std::string& message) {
+    return WinHttpWebSocketSend(
+        socket,
+        WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
+        const_cast<char*>(message.data()),
+        static_cast<DWORD>(message.size()));
+}
+
+DWORD ReceiveWebSocketText(HINTERNET socket, std::string& message, bool& closed) {
+    message.clear();
+    closed = false;
+
+    while (message.size() <= kMaxRoomReplyBytes) {
+        std::array<char, 4096> buffer{};
+        DWORD bytesRead = 0;
+        WINHTTP_WEB_SOCKET_BUFFER_TYPE type = WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE;
+        const DWORD error = WinHttpWebSocketReceive(
+            socket,
+            buffer.data(),
+            static_cast<DWORD>(buffer.size()),
+            &bytesRead,
+            &type);
+        if (error != ERROR_SUCCESS) {
+            return error;
+        }
+        if (type == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE) {
+            closed = true;
+            return ERROR_SUCCESS;
+        }
+        if (type != WINHTTP_WEB_SOCKET_UTF8_FRAGMENT_BUFFER_TYPE &&
+            type != WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE) {
+            return ERROR_INVALID_DATA;
+        }
+
+        message.append(buffer.data(), bytesRead);
+        if (type == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE) {
+            return message.size() <= kMaxRoomReplyBytes ? ERROR_SUCCESS : ERROR_INSUFFICIENT_BUFFER;
+        }
+    }
+
+    return ERROR_INSUFFICIENT_BUFFER;
+}
+
+void ApplyRoomResultLocked(RoomLookupState& state, RoomSnapshot result,
+                           std::uint64_t generation) {
+    result.lookupInFlight = false;
+    result.identityGeneration = generation;
+
+    if (!state.desiredOnline || state.desiredIdentityGeneration != generation) {
+        return;
+    }
+
+    const bool hadConfirmedRoom =
+        state.snapshot.roomFound &&
+        state.snapshot.identityGeneration == generation;
+
+    if (result.lookupSucceeded && result.roomFound) {
+        // Positive room evidence immediately accepts joins and room switches.
+        state.snapshot = std::move(result);
+        state.consecutiveRoomMisses = 0;
+    } else if (result.lookupSucceeded && !result.roomFound && hadConfirmedRoom) {
+        // Public roster transitions can briefly omit a participant. Three
+        // consecutive structurally valid misses are required before clearing
+        // an already confirmed room.
+        ++state.consecutiveRoomMisses;
+        if (state.consecutiveRoomMisses >= kRoomLeaveConfirmations) {
+            state.snapshot = std::move(result);
+            state.consecutiveRoomMisses = 0;
+        } else {
+            state.snapshot.lookupInFlight = false;
+            state.snapshot.lookupComplete = true;
+            state.snapshot.status =
+                "Room still active; background verification miss " +
+                std::to_string(state.consecutiveRoomMisses) + "/" +
+                std::to_string(kRoomLeaveConfirmations);
+        }
+    } else if (!result.lookupSucceeded && hadConfirmedRoom) {
+        // A Worker/network/parser failure is not evidence of a room leave.
+        state.snapshot.lookupInFlight = false;
+        state.snapshot.lookupComplete = true;
+        state.snapshot.status =
+            "Room still active; background verification temporarily unavailable";
+    } else {
+        state.snapshot = std::move(result);
+        if (state.snapshot.lookupSucceeded) {
+            state.consecutiveRoomMisses = 0;
+        }
+    }
+}
+
+void FinishRoomWorker(std::uint64_t generation, std::string status,
+                      bool reconnect) {
+    RoomLookupState& state = RoomState();
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        if (state.workerIdentityGeneration != generation) {
+            return;
+        }
+
+        state.workerRunning = false;
+        state.workerIdentityGeneration = UINT64_MAX;
+        state.snapshot.lookupInFlight = false;
+
+        if (state.desiredOnline && state.desiredIdentityGeneration == generation) {
+            if (!status.empty()) {
+                state.snapshot.lookupComplete = true;
+                if (state.snapshot.roomFound) {
+                    state.snapshot.status =
+                        "Room still active; signaling connection will reconnect";
+                } else {
+                    state.snapshot.status = std::move(status);
+                }
+            }
+            state.nextReconnectAttempt = reconnect
+                ? std::chrono::steady_clock::now() + kRoomReconnectDelay
+                : std::chrono::steady_clock::time_point{};
+        } else {
+            state.nextReconnectAttempt = {};
+        }
+    }
+    state.wake.notify_all();
+}
+
+void PersistentRoomWorker(std::string profileId, std::uint64_t generation) {
     constexpr wchar_t kWorkerHost[] = L"mkw-voicechat-signaling.mkwvoicechat.workers.dev";
 
     WinHttpHandle session(WinHttpOpen(
-        L"MKW VoiceChat WiiCompiled bridge/0.1",
+        L"MKW VoiceChat WiiCompiled bridge/0.2",
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
         WINHTTP_NO_PROXY_NAME,
         WINHTTP_NO_PROXY_BYPASS,
         0));
     if (!session.value) {
-        RoomSnapshot result;
-        result.lookupComplete = true;
-        result.status = WinHttpError("WinHttpOpen");
-        return result;
+        FinishRoomWorker(generation, WinHttpError("WinHttpOpen"), true);
+        return;
     }
-    WinHttpSetTimeouts(session.value, 5000, 5000, 5000, 5000);
 
-    WinHttpHandle connection(WinHttpConnect(session.value, kWorkerHost, INTERNET_DEFAULT_HTTPS_PORT, 0));
+    // Connection setup should fail quickly, while the receive side may remain
+    // blocked because the sender refreshes presence every 30 seconds.
+    WinHttpSetTimeouts(session.value, 5000, 5000, 5000, 60000);
+
+    WinHttpHandle connection(WinHttpConnect(
+        session.value, kWorkerHost, INTERNET_DEFAULT_HTTPS_PORT, 0));
     if (!connection.value) {
-        RoomSnapshot result;
-        result.lookupComplete = true;
-        result.status = WinHttpError("WinHttpConnect");
-        return result;
+        FinishRoomWorker(generation, WinHttpError("WinHttpConnect"), true);
+        return;
     }
 
     WinHttpHandle request(WinHttpOpenRequest(
@@ -355,201 +507,192 @@ RoomSnapshot LookupRoomViaSignalingWorker(const std::string& profileId) {
         WINHTTP_DEFAULT_ACCEPT_TYPES,
         WINHTTP_FLAG_SECURE));
     if (!request.value) {
-        RoomSnapshot result;
-        result.lookupComplete = true;
-        result.status = WinHttpError("WinHttpOpenRequest");
-        return result;
+        FinishRoomWorker(generation, WinHttpError("WinHttpOpenRequest"), true);
+        return;
     }
 
-    DWORD error = WinHttpSetOption(request.value, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0)
+    DWORD error = WinHttpSetOption(
+        request.value, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0)
         ? ERROR_SUCCESS : GetLastError();
     if (error != ERROR_SUCCESS) {
-        RoomSnapshot result;
-        result.lookupComplete = true;
-        result.status = WinHttpError("WebSocket upgrade", error);
-        return result;
+        FinishRoomWorker(generation, WinHttpError("WebSocket upgrade", error), true);
+        return;
     }
     if (!WinHttpSendRequest(request.value, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
                             WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
-        RoomSnapshot result;
-        result.lookupComplete = true;
-        result.status = WinHttpError("WinHttpSendRequest");
-        return result;
+        FinishRoomWorker(generation, WinHttpError("WinHttpSendRequest"), true);
+        return;
     }
     if (!WinHttpReceiveResponse(request.value, nullptr)) {
-        RoomSnapshot result;
-        result.lookupComplete = true;
-        result.status = WinHttpError("WinHttpReceiveResponse");
-        return result;
+        FinishRoomWorker(generation, WinHttpError("WinHttpReceiveResponse"), true);
+        return;
     }
 
     WinHttpHandle socket(WinHttpWebSocketCompleteUpgrade(request.value, 0));
     if (!socket.value) {
-        RoomSnapshot result;
-        result.lookupComplete = true;
-        result.status = WinHttpError("WinHttpWebSocketCompleteUpgrade");
-        return result;
+        FinishRoomWorker(generation, WinHttpError("WinHttpWebSocketCompleteUpgrade"), true);
+        return;
     }
 
-    const std::string command = "RR_DEBUG_LOOKUP " + profileId;
-    error = WinHttpWebSocketSend(socket.value, WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
-                                 const_cast<char*>(command.data()),
-                                 static_cast<DWORD>(command.size()));
-    if (error != ERROR_SUCCESS) {
-        RoomSnapshot result;
-        result.lookupComplete = true;
-        result.status = WinHttpError("WinHttpWebSocketSend", error);
-        return result;
-    }
+    DWORD keepAliveMs = 30000;
+    (void)WinHttpSetOption(
+        socket.value,
+        WINHTTP_OPTION_WEB_SOCKET_KEEPALIVE_INTERVAL,
+        &keepAliveMs,
+        sizeof(keepAliveMs));
+    DWORD closeTimeoutMs = 5000;
+    (void)WinHttpSetOption(
+        socket.value,
+        WINHTTP_OPTION_WEB_SOCKET_CLOSE_TIMEOUT,
+        &closeTimeoutMs,
+        sizeof(closeTimeoutMs));
 
-    std::string message;
-    while (message.size() <= kMaxRoomReplyBytes) {
-        std::array<char, 4096> buffer{};
-        DWORD bytesRead = 0;
-        WINHTTP_WEB_SOCKET_BUFFER_TYPE type = WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE;
-        error = WinHttpWebSocketReceive(socket.value, buffer.data(), static_cast<DWORD>(buffer.size()),
-                                        &bytesRead, &type);
+    RoomLookupState& state = RoomState();
+    std::atomic<bool> connectionAlive{true};
+    std::atomic<DWORD> sendFailure{ERROR_SUCCESS};
+
+    // WinHTTP explicitly permits one WebSocket sender and one receiver to run
+    // concurrently. The receiver below consumes Worker-pushed presence updates;
+    // this sender handles the initial registration, 30-second verification and
+    // manual refresh requests without touching the game/UI thread.
+    std::thread sender([&]() {
+        const auto sendPresence = [&]() -> bool {
+            {
+                std::lock_guard<std::mutex> lock(state.mutex);
+                if (!state.desiredOnline ||
+                    state.desiredIdentityGeneration != generation ||
+                    !connectionAlive.load(std::memory_order_acquire)) {
+                    return false;
+                }
+                state.snapshot.lookupInFlight = true;
+                state.snapshot.identityGeneration = generation;
+                state.snapshot.profileId = profileId;
+                if (!state.snapshot.lookupComplete && !state.snapshot.roomFound) {
+                    state.snapshot.status = "Verifying Retro Rewind voice presence...";
+                }
+            }
+
+            const std::string command = "RR_DEBUG_PRESENCE " + profileId;
+            const DWORD sendError = SendWebSocketText(socket.value, command);
+            if (sendError != ERROR_SUCCESS) {
+                sendFailure.store(sendError, std::memory_order_release);
+                connectionAlive.store(false, std::memory_order_release);
+                state.wake.notify_all();
+                (void)WinHttpWebSocketShutdown(
+                    socket.value,
+                    WINHTTP_WEB_SOCKET_ENDPOINT_TERMINATED_CLOSE_STATUS,
+                    nullptr,
+                    0);
+                return false;
+            }
+            return true;
+        };
+
+        if (!sendPresence()) {
+            return;
+        }
+
+        while (connectionAlive.load(std::memory_order_acquire)) {
+            bool stop = false;
+            {
+                std::unique_lock<std::mutex> lock(state.mutex);
+                state.wake.wait_for(lock, kRoomPresenceRefreshInterval, [&]() {
+                    return !connectionAlive.load(std::memory_order_acquire) ||
+                           !state.desiredOnline ||
+                           state.desiredIdentityGeneration != generation ||
+                           state.manualRefreshRequested;
+                });
+
+                stop =
+                    !connectionAlive.load(std::memory_order_acquire) ||
+                    !state.desiredOnline ||
+                    state.desiredIdentityGeneration != generation;
+
+                if (!stop) {
+                    // Multiple manual clicks collapse into one immediate refresh.
+                    state.manualRefreshRequested = false;
+                }
+            }
+
+            if (stop) {
+                break;
+            }
+            if (!sendPresence()) {
+                return;
+            }
+        }
+
+        if (connectionAlive.load(std::memory_order_acquire)) {
+            const std::string clear = "RR_DEBUG_PRESENCE_CLEAR";
+            (void)SendWebSocketText(socket.value, clear);
+            (void)WinHttpWebSocketShutdown(
+                socket.value,
+                WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS,
+                nullptr,
+                0);
+            connectionAlive.store(false, std::memory_order_release);
+        }
+    });
+
+    std::string terminalStatus;
+    bool reconnect = true;
+
+    while (connectionAlive.load(std::memory_order_acquire)) {
+        std::string message;
+        bool closed = false;
+        error = ReceiveWebSocketText(socket.value, message, closed);
         if (error != ERROR_SUCCESS) {
-            RoomSnapshot result;
-            result.lookupComplete = true;
-            result.status = WinHttpError("WinHttpWebSocketReceive", error);
-            return result;
-        }
-        if (type == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE) {
-            RoomSnapshot result;
-            result.lookupComplete = true;
-            result.status = "Signaling socket closed before RR room reply";
-            return result;
-        }
-        if (type != WINHTTP_WEB_SOCKET_UTF8_FRAGMENT_BUFFER_TYPE &&
-            type != WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE) {
-            RoomSnapshot result;
-            result.lookupComplete = true;
-            result.status = "Signaling Worker returned a non-text RR room reply";
-            return result;
-        }
-        message.append(buffer.data(), bytesRead);
-        if (type == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE) {
+            terminalStatus = WinHttpError("WinHttpWebSocketReceive", error);
+            connectionAlive.store(false, std::memory_order_release);
+            state.wake.notify_all();
             break;
         }
+        if (closed) {
+            connectionAlive.store(false, std::memory_order_release);
+            state.wake.notify_all();
+            terminalStatus = "Voice signaling WebSocket closed";
+            break;
+        }
+
+        RoomSnapshot result = ParseRoomReply(message, profileId);
+        std::lock_guard<std::mutex> lock(state.mutex);
+        ApplyRoomResultLocked(state, std::move(result), generation);
     }
 
-    WinHttpWebSocketClose(socket.value, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr, 0);
-    if (message.size() > kMaxRoomReplyBytes) {
-        RoomSnapshot result;
-        result.lookupComplete = true;
-        result.status = "Retro Rewind room reply exceeded size limit";
-        return result;
+    state.wake.notify_all();
+    if (sender.joinable()) {
+        sender.join();
     }
-    return ParseRoomReply(message, profileId);
+
+    const DWORD failedSend = sendFailure.load(std::memory_order_acquire);
+    if (failedSend != ERROR_SUCCESS) {
+        terminalStatus = WinHttpError("WinHttpWebSocketSend", failedSend);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        // Identity change/offline is an intentional stop. The next identity is
+        // started by ServiceRoomLookup without reporting a transport failure.
+        if (!state.desiredOnline || state.desiredIdentityGeneration != generation) {
+            reconnect = false;
+            terminalStatus.clear();
+        }
+    }
+
+    FinishRoomWorker(generation, std::move(terminalStatus), reconnect);
 }
 
 #else
 
-RoomSnapshot LookupRoomViaSignalingWorker(const std::string&) {
-    RoomSnapshot result;
-    result.lookupComplete = true;
-    result.status = "RR signaling lookup is not implemented on this host platform yet";
-    return result;
+constexpr auto kRoomReconnectDelay = std::chrono::seconds(5);
+
+void PersistentRoomWorker(std::string, std::uint64_t generation) {
+    FinishRoomWorker(generation,
+                     "RR signaling presence is not implemented on this host platform yet",
+                     false);
 }
 
 #endif
-
-bool StartRoomLookup(const IdentitySnapshot& identity) noexcept {
-    if (!identity.online || identity.profileId.empty()) {
-        return false;
-    }
-
-    RoomLookupState& state = RoomState();
-    std::uint64_t token = 0;
-    {
-        std::lock_guard<std::mutex> lock(state.mutex);
-        if (state.snapshot.lookupInFlight) {
-            return false;
-        }
-        token = ++state.lookupToken;
-
-        // A background verification must not behave like pressing the manual
-        // refresh button. Keep the last confirmed room visible/active while the
-        // new lookup is in flight; only the very first lookup gets a loading
-        // status.
-        const bool hadRoom = state.snapshot.roomFound;
-        const bool hadResult = state.snapshot.lookupComplete;
-        state.snapshot.lookupInFlight = true;
-        state.snapshot.identityGeneration = identity.generation;
-        state.snapshot.profileId = identity.profileId;
-        if (!hadRoom && !hadResult) {
-            state.snapshot.status = "Looking up current Retro Rewind room...";
-        }
-    }
-
-    try {
-        std::thread([profileId = identity.profileId, generation = identity.generation, token]() {
-            RoomSnapshot result = LookupRoomViaSignalingWorker(profileId);
-            result.lookupInFlight = false;
-            result.identityGeneration = generation;
-
-            RoomLookupState& state = RoomState();
-            std::lock_guard<std::mutex> lock(state.mutex);
-            if (state.lookupToken != token) {
-                return;
-            }
-
-            const bool hadConfirmedRoom =
-                state.snapshot.roomFound &&
-                state.snapshot.identityGeneration == generation;
-
-            if (result.lookupSucceeded && result.roomFound) {
-                // Positive room evidence is authoritative for discovery: accept
-                // joins and room switches immediately and reset any miss streak.
-                state.snapshot = std::move(result);
-                state.consecutiveRoomMisses = 0;
-            } else if (result.lookupSucceeded && !result.roomFound && hadConfirmedRoom) {
-                // The public roster can briefly omit a player during transitions
-                // or backend hiccups. Do not tear down a confirmed voice room on
-                // one empty lookup. Require several consecutive valid misses.
-                ++state.consecutiveRoomMisses;
-                if (state.consecutiveRoomMisses >= kRoomLeaveConfirmations) {
-                    state.snapshot = std::move(result);
-                    state.consecutiveRoomMisses = 0;
-                } else {
-                    state.snapshot.lookupInFlight = false;
-                    state.snapshot.lookupComplete = true;
-                    state.snapshot.status =
-                        "Room still active; background verification miss " +
-                        std::to_string(state.consecutiveRoomMisses) + "/" +
-                        std::to_string(kRoomLeaveConfirmations);
-                }
-            } else if (!result.lookupSucceeded && hadConfirmedRoom) {
-                // Network/Worker errors are not evidence that the user left.
-                // Keep the last confirmed room and try again on the next cycle.
-                state.snapshot.lookupInFlight = false;
-                state.snapshot.lookupComplete = true;
-                state.snapshot.status =
-                    "Room still active; background verification temporarily unavailable";
-            } else {
-                state.snapshot = std::move(result);
-                if (state.snapshot.lookupSucceeded) {
-                    state.consecutiveRoomMisses = 0;
-                }
-            }
-
-            state.nextAutomaticLookup =
-                std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        }).detach();
-        return true;
-    } catch (...) {
-        std::lock_guard<std::mutex> lock(state.mutex);
-        if (state.lookupToken == token) {
-            state.snapshot.lookupInFlight = false;
-            state.snapshot.lookupComplete = true;
-            if (!state.snapshot.roomFound) {
-                state.snapshot.status = "Failed to start RR room lookup worker";
-            }
-        }
-        return false;
-    }
-}
 
 } // namespace
 
@@ -609,42 +752,86 @@ void ServiceRoomLookup() noexcept {
     try {
         const IdentitySnapshot identity = Snapshot();
         RoomLookupState& state = RoomState();
-
-        if (!identity.online || identity.profileId.empty()) {
-            std::lock_guard<std::mutex> lock(state.mutex);
-            if (state.observedIdentityGeneration != identity.generation ||
-                state.snapshot.lookupInFlight || state.snapshot.lookupComplete) {
-                state.observedIdentityGeneration = identity.generation;
-                ++state.lookupToken;
-                state.snapshot = {};
-                state.snapshot.identityGeneration = identity.generation;
-                state.snapshot.status = "Waiting for live Retro Rewind identity";
-                state.consecutiveRoomMisses = 0;
-                state.nextAutomaticLookup = {};
-            }
-            return;
-        }
-
         const auto now = std::chrono::steady_clock::now();
-        bool needsLookup = false;
+
+        bool notifyWorker = false;
+        bool startWorker = false;
+
         {
             std::lock_guard<std::mutex> lock(state.mutex);
-            const bool identityChanged =
-                state.observedIdentityGeneration != identity.generation;
-            const bool periodicRefreshDue =
-                !state.snapshot.lookupInFlight &&
-                (state.nextAutomaticLookup == std::chrono::steady_clock::time_point{} ||
-                 now >= state.nextAutomaticLookup);
-            needsLookup = identityChanged || periodicRefreshDue;
+            state.desiredOnline = identity.online && !identity.profileId.empty();
+            state.desiredIdentityGeneration = identity.generation;
+            state.desiredProfileId = identity.profileId;
+
+            if (!state.desiredOnline) {
+                notifyWorker = state.workerRunning;
+                state.manualRefreshRequested = false;
+                state.nextReconnectAttempt = {};
+
+                if (state.observedIdentityGeneration != identity.generation ||
+                    state.snapshot.lookupInFlight ||
+                    state.snapshot.lookupComplete ||
+                    state.snapshot.roomFound) {
+                    state.observedIdentityGeneration = identity.generation;
+                    state.snapshot = {};
+                    state.snapshot.identityGeneration = identity.generation;
+                    state.snapshot.status = "Waiting for live Retro Rewind identity";
+                    state.consecutiveRoomMisses = 0;
+                }
+            } else {
+                const bool identityChanged =
+                    state.observedIdentityGeneration != identity.generation;
+
+                if (identityChanged) {
+                    state.observedIdentityGeneration = identity.generation;
+                    state.consecutiveRoomMisses = 0;
+                    state.manualRefreshRequested = false;
+                    state.nextReconnectAttempt = {};
+
+                    // Never carry a confirmed room from an old GPCM session into
+                    // a new identity generation.
+                    state.snapshot = {};
+                    state.snapshot.identityGeneration = identity.generation;
+                    state.snapshot.profileId = identity.profileId;
+                    state.snapshot.status = "Connecting to voice signaling...";
+                }
+
+                if (state.workerRunning) {
+                    if (state.workerIdentityGeneration != identity.generation) {
+                        notifyWorker = true;
+                    }
+                } else if (state.nextReconnectAttempt == std::chrono::steady_clock::time_point{} ||
+                           now >= state.nextReconnectAttempt) {
+                    state.workerRunning = true;
+                    state.workerIdentityGeneration = identity.generation;
+                    state.manualRefreshRequested = false;
+                    state.snapshot.lookupInFlight = true;
+                    state.snapshot.identityGeneration = identity.generation;
+                    state.snapshot.profileId = identity.profileId;
+                    if (!state.snapshot.lookupComplete && !state.snapshot.roomFound) {
+                        state.snapshot.status = "Connecting to voice signaling...";
+                    }
+                    startWorker = true;
+                }
+            }
         }
 
-        if (needsLookup && StartRoomLookup(identity)) {
-            std::lock_guard<std::mutex> lock(state.mutex);
-            state.observedIdentityGeneration = identity.generation;
-            // Reserve the next slot immediately so a very fast failure cannot
-            // cause one worker to be spawned per rendered frame. Completion
-            // moves this to five seconds after the actual result.
-            state.nextAutomaticLookup = now + std::chrono::seconds(5);
+        if (notifyWorker) {
+            state.wake.notify_all();
+        }
+
+        if (startWorker) {
+            try {
+                std::thread(
+                    PersistentRoomWorker,
+                    identity.profileId,
+                    identity.generation).detach();
+            } catch (...) {
+                FinishRoomWorker(
+                    identity.generation,
+                    "Failed to start persistent RR signaling worker",
+                    true);
+            }
         }
     } catch (...) {
     }
@@ -653,7 +840,17 @@ void ServiceRoomLookup() noexcept {
 void RequestRoomLookup() noexcept {
     try {
         const IdentitySnapshot identity = Snapshot();
-        (void)StartRoomLookup(identity);
+        if (!identity.online || identity.profileId.empty()) {
+            return;
+        }
+
+        RoomLookupState& state = RoomState();
+        {
+            std::lock_guard<std::mutex> lock(state.mutex);
+            state.manualRefreshRequested = true;
+            state.nextReconnectAttempt = {};
+        }
+        state.wake.notify_all();
     } catch (...) {
     }
 }
