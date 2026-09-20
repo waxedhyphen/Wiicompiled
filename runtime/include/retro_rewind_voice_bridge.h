@@ -41,6 +41,9 @@ struct RoomSnapshot {
     bool lookupSucceeded = false;
     bool localRoomActive = false;
     bool roomFound = false;
+    bool signalingConnected = false;
+    bool presenceFrameSent = false;
+    bool signalingReplyReceived = false;
     std::string status;
     std::string profileId;
     std::string roomId;
