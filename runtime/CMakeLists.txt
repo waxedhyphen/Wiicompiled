@@ -235,6 +235,15 @@ if(MKW_PROJECT_COMPILE_DEFINITIONS)
     add_compile_definitions(${MKW_PROJECT_COMPILE_DEFINITIONS})
 endif()
 
+# MKW VoiceChat integration sources are kept outside runtime/src so the
+# translator/native-source scan never mistakes host-only voice code for guest
+# native overrides. Stage 1 compiles VoiceClient.cpp with the shipped toolchain
+# and links a small status object into the products; external audio/ICE
+# dependencies are added in the next stage.
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/voicechat/CMakeLists.txt")
+    add_subdirectory(voicechat)
+endif()
+
 # Runtime sources. CONFIGURE_DEPENDS costs one glob re-check per build (measured
 # at ~55 ms across the 100+ globs this build already re-verifies for SDL), and it
 # buys correctness: without it, a newly added src/*.cpp that is not referenced by
