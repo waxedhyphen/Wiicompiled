@@ -6,6 +6,7 @@
 #include <array>
 #include <cctype>
 #include <charconv>
+#include <chrono>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -46,6 +47,7 @@ struct RoomLookupState {
     RoomSnapshot snapshot;
     std::uint64_t observedIdentityGeneration = UINT64_MAX;
     std::uint64_t lookupToken = 0;
+    std::chrono::steady_clock::time_point nextAutomaticLookup{};
 };
 
 RoomLookupState& RoomState() {
@@ -482,6 +484,7 @@ bool StartRoomLookup(const IdentitySnapshot& identity) noexcept {
                 return;
             }
             state.snapshot = std::move(result);
+            state.nextAutomaticLookup = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         }).detach();
         return true;
     } catch (...) {
@@ -563,18 +566,31 @@ void ServiceRoomLookup() noexcept {
                 state.snapshot = {};
                 state.snapshot.identityGeneration = identity.generation;
                 state.snapshot.status = "Waiting for live Retro Rewind identity";
+                state.nextAutomaticLookup = {};
             }
             return;
         }
 
+        const auto now = std::chrono::steady_clock::now();
         bool needsLookup = false;
         {
             std::lock_guard<std::mutex> lock(state.mutex);
-            needsLookup = state.observedIdentityGeneration != identity.generation;
+            const bool identityChanged =
+                state.observedIdentityGeneration != identity.generation;
+            const bool periodicRefreshDue =
+                !state.snapshot.lookupInFlight &&
+                (state.nextAutomaticLookup == std::chrono::steady_clock::time_point{} ||
+                 now >= state.nextAutomaticLookup);
+            needsLookup = identityChanged || periodicRefreshDue;
         }
+
         if (needsLookup && StartRoomLookup(identity)) {
             std::lock_guard<std::mutex> lock(state.mutex);
             state.observedIdentityGeneration = identity.generation;
+            // Reserve the next slot immediately so a very fast failure cannot
+            // cause one worker to be spawned per rendered frame. Completion
+            // moves this to five seconds after the actual result.
+            state.nextAutomaticLookup = now + std::chrono::seconds(5);
         }
     } catch (...) {
     }
