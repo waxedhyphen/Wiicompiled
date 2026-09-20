@@ -9,6 +9,7 @@
 #else
 #error "Opus headers were not found"
 #endif
+#include <rtc/rtc.hpp>
 #include <speex/speex_preprocess.h>
 
 namespace {
@@ -16,10 +17,12 @@ namespace {
 using MiniAudioVersionFn = const char* (*)(void);
 using OpusVersionFn = const char* (*)(void);
 using SpeexInitFn = SpeexPreprocessState* (*)(int, int);
+using RtcPreloadFn = void (*)(void);
 
 MiniAudioVersionFn volatile g_miniaudioLinkProbe = &ma_version_string;
 OpusVersionFn volatile g_opusLinkProbe = &opus_get_version_string;
 SpeexInitFn volatile g_speexLinkProbe = &speex_preprocess_state_init;
+RtcPreloadFn volatile g_rtcLinkProbe = &rtc::Preload;
 
 }
 
@@ -35,7 +38,7 @@ EmbeddedCoreStatus embeddedCoreStatus() noexcept {
         g_miniaudioLinkProbe != nullptr &&
         g_opusLinkProbe != nullptr &&
         g_speexLinkProbe != nullptr;
-    status.iceDependenciesLinked = false;
+    status.iceDependenciesLinked = g_rtcLinkProbe != nullptr;
     return status;
 }
 
