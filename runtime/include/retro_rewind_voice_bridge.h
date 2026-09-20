@@ -39,6 +39,7 @@ struct RoomSnapshot {
     bool lookupInFlight = false;
     bool lookupComplete = false;
     bool lookupSucceeded = false;
+    bool localRoomActive = false;
     bool roomFound = false;
     std::string status;
     std::string profileId;
@@ -50,9 +51,10 @@ struct RoomSnapshot {
 };
 
 // Called from the host runtime once per presented frame. A live GPCM identity
-// keeps one persistent signaling WebSocket alive in a background worker. Room
-// presence is refreshed periodically over that same socket, and Worker-pushed
-// presence updates are consumed without network I/O on the game/UI thread.
+// keeps one persistent signaling WebSocket alive in a background worker. Local
+// RKNet room state gates voice presence immediately: leaving the game room
+// clears voice presence without waiting for the public roster poll. Worker-
+ // pushed presence updates are consumed without network I/O on the game/UI thread.
 void ServiceRoomLookup() noexcept;
 RoomSnapshot Room();
 
