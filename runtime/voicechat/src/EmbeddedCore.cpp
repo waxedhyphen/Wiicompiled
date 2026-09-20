@@ -170,7 +170,7 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
         state.status.lifecycleActive = true;
         state.status.roomInstanceId = input.roomInstanceId;
         state.status.voiceClientRunning = false;
-        state.status.authorizedPeerCount =
+        state.status.developmentPeerCount =
             static_cast<std::uint32_t>(state.authorizedPeers.size());
         state.status.peerCount = 0;
 
@@ -182,14 +182,18 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
                 state.signaling =
                     std::make_unique<SignalingClient>(std::string(kSignalingUrl));
                 state.status.signalingConnected = false;
-                state.status.authorizationPending = false;
-                state.status.roomAuthorized = false;
+                state.status.productionAuthorizationPending = false;
+                state.status.productionAuthorized = false;
+                state.status.developmentAdmissionPending = false;
+                state.status.developmentAdmitted = false;
                 state.status.status = "Connecting embedded signaling...";
             } catch (...) {
                 state.nextReconnect = now + kReconnectDelay;
                 state.status.signalingConnected = false;
-                state.status.authorizationPending = false;
-                state.status.roomAuthorized = false;
+                state.status.productionAuthorizationPending = false;
+                state.status.productionAuthorized = false;
+                state.status.developmentAdmissionPending = false;
+                state.status.developmentAdmitted = false;
                 state.status.status = "Embedded signaling failed; retrying";
             }
         }
@@ -204,88 +208,60 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
         for (auto& event : state.signaling->takeEvents()) {
             switch (event.type) {
                 case SignalingEventType::Open:
-                    state.status.signalingConnected = true;
-                    state.status.roomAuthorized = false;
-                    if (input.sessionKey.empty() || input.gameName.empty()) {
-                        state.status.authorizationPending = false;
-                        state.status.status = "Live RR credentials unavailable";
-                        break;
-                    }
+                    state.status.signalingConnected=true;
+                    state.status.productionAuthorizationPending=false;
+                    state.status.productionAuthorized=false;
+                    state.status.developmentAdmitted=false;
+                    state.authorizedPeers.clear();
+                    state.status.developmentPeerCount=0;
                     try {
-                        state.signaling->authenticateRetroRewind(
+                        state.signaling->admitRetroRewindDevelopment(
                             input.profileId,
-                            input.sessionKey,
-                            input.gameName);
-                        state.status.authorizationPending = true;
-                        state.status.status = "Authenticating live RR session...";
+                            input.roomInstanceId);
+                        state.status.developmentAdmissionPending=true;
+                        state.status.status=
+                            "Requesting unverified public-roster development admission...";
                     } catch (...) {
-                        state.status.authorizationPending = false;
-                        state.status.status = "Failed to submit RR authentication";
+                        state.status.developmentAdmissionPending=false;
+                        state.status.status=
+                            "Failed to request development room admission";
                     }
                     break;
-                case SignalingEventType::RetroRewindStatus: {
-                    state.status.authorizationPending = false;
-                    const bool authorized=matchesAuthorizedRoom(
-                        event.payload,
-                        input.profileId,
-                        input.roomInstanceId);
-                    state.status.roomAuthorized=authorized;
-                    if(!authorized) {
-                        state.status.voiceRoomAdmissionPending=false;
-                        state.status.voiceRoomAdmitted=false;
-                        state.status.localMemberId.clear();
-                        state.authorizedPeers.clear();
-                        state.status.authorizedPeerCount=0;
-                        state.status.status="Verified RR room does not match local room instance";
-                        break;
-                    }
-
-                    if(!state.status.voiceRoomAdmitted &&
-                       !state.status.voiceRoomAdmissionPending) {
-                        try {
-                            state.signaling->admitRetroRewindRoom(input.roomInstanceId);
-                            state.status.voiceRoomAdmissionPending=true;
-                            state.status.status="RR authorized; requesting voice-room admission...";
-                        } catch (...) {
-                            state.status.voiceRoomAdmissionPending=false;
-                            state.status.status="Failed to request RR voice-room admission";
-                        }
-                    }
-                    break;
-                }
-                case SignalingEventType::RetroRewindAdmitted: {
+                case SignalingEventType::RetroRewindDevelopmentAdmitted: {
                     std::string memberId;
                     std::string admittedRoom;
                     if(!parseAdmission(event.payload,memberId,admittedRoom) ||
                        admittedRoom!=input.roomInstanceId) {
-                        state.status.voiceRoomAdmissionPending=false;
-                        state.status.voiceRoomAdmitted=false;
+                        state.status.developmentAdmissionPending=false;
+                        state.status.developmentAdmitted=false;
                         state.status.localMemberId.clear();
                         state.authorizedPeers.clear();
-                        state.status.authorizedPeerCount=0;
-                        state.status.status="Malformed or mismatched RR voice-room admission";
+                        state.status.developmentPeerCount=0;
+                        state.status.status=
+                            "Malformed or mismatched development admission";
                         break;
                     }
-                    state.status.voiceRoomAdmissionPending=false;
-                    state.status.voiceRoomAdmitted=true;
+                    state.status.developmentAdmissionPending=false;
+                    state.status.developmentAdmitted=true;
                     state.status.localMemberId=std::move(memberId);
-                    state.status.status="Authorized RR voice room admitted; waiting for peers";
+                    state.status.status=
+                        "UNVERIFIED dev room admitted; waiting for peers";
                     break;
                 }
-                case SignalingEventType::RetroRewindAdmissionFailed:
-                    state.status.voiceRoomAdmissionPending=false;
-                    state.status.voiceRoomAdmitted=false;
+                case SignalingEventType::RetroRewindDevelopmentAdmissionFailed:
+                    state.status.developmentAdmissionPending=false;
+                    state.status.developmentAdmitted=false;
                     state.status.localMemberId.clear();
                     state.authorizedPeers.clear();
-                    state.status.authorizedPeerCount=0;
+                    state.status.developmentPeerCount=0;
                     state.status.status=event.payload.empty()
-                        ? "RR voice-room admission failed"
-                        : "RR voice-room admission failed: "+event.payload;
+                        ? "Development room admission failed"
+                        : "Development admission failed: "+event.payload;
                     break;
-                case SignalingEventType::RetroRewindPeerInfo: {
+                case SignalingEventType::RetroRewindDevelopmentPeerInfo: {
                     std::string memberId;
                     std::string participantId;
-                    if(!state.status.voiceRoomAdmitted ||
+                    if(!state.status.developmentAdmitted ||
                        !parseAuthorizedPeer(
                            event.payload,
                            input.roomInstanceId,
@@ -295,60 +271,54 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
                         break;
                     }
                     state.authorizedPeers[memberId]=participantId;
-                    state.status.authorizedPeerCount=
+                    state.status.developmentPeerCount=
                         static_cast<std::uint32_t>(state.authorizedPeers.size());
-                    state.status.status="Authorized RR peer introduced; ICE not started yet";
+                    state.status.status=
+                        "UNVERIFIED dev peer introduced; ICE not started yet";
                     break;
                 }
-                case SignalingEventType::RetroRewindAuthFailed:
-                    state.status.authorizationPending = false;
-                    state.status.roomAuthorized = false;
-                    state.status.voiceRoomAdmissionPending=false;
-                    state.status.voiceRoomAdmitted=false;
-                    state.status.localMemberId.clear();
-                    state.authorizedPeers.clear();
-                    state.status.authorizedPeerCount=0;
-                    state.status.status = event.payload.empty()
-                        ? "RR voice admission failed"
-                        : "RR admission failed: " + event.payload;
+                case SignalingEventType::RetroRewindStatus:
+                    state.status.productionAuthorizationPending=false;
+                    state.status.productionAuthorized=matchesAuthorizedRoom(
+                        event.payload,
+                        input.profileId,
+                        input.roomInstanceId);
                     break;
+                case SignalingEventType::RetroRewindAuthFailed:
                 case SignalingEventType::RetroRewindAuthRequired:
-                    state.status.authorizationPending = false;
-                    state.status.roomAuthorized = false;
-                    state.status.voiceRoomAdmissionPending=false;
-                    state.status.voiceRoomAdmitted=false;
-                    state.status.localMemberId.clear();
-                    state.authorizedPeers.clear();
-                    state.status.authorizedPeerCount=0;
-                    state.status.status = "RR voice admission expired";
+                case SignalingEventType::RetroRewindAdmissionFailed:
+                    state.status.productionAuthorizationPending=false;
+                    state.status.productionAuthorized=false;
+                    break;
+                case SignalingEventType::RetroRewindAdmitted:
+                    state.status.productionAuthorizationPending=false;
+                    state.status.productionAuthorized=true;
                     break;
                 case SignalingEventType::TransportError:
                 case SignalingEventType::Closed:
-                    state.status.signalingConnected = false;
-                    state.status.authorizationPending = false;
-                    state.status.roomAuthorized = false;
-                    state.status.voiceRoomAdmissionPending=false;
-                    state.status.voiceRoomAdmitted=false;
+                    state.status.signalingConnected=false;
+                    state.status.productionAuthorizationPending=false;
+                    state.status.productionAuthorized=false;
+                    state.status.developmentAdmissionPending=false;
+                    state.status.developmentAdmitted=false;
                     state.status.localMemberId.clear();
                     state.authorizedPeers.clear();
-                    state.status.authorizedPeerCount=0;
-                    state.status.status = "Embedded signaling disconnected; retrying";
-                    reconnect = true;
+                    state.status.developmentPeerCount=0;
+                    state.status.status="Embedded signaling disconnected; retrying";
+                    reconnect=true;
                     break;
                 case SignalingEventType::Error:
-                    state.status.authorizationPending = false;
-                    state.status.roomAuthorized = false;
-                    state.status.voiceRoomAdmissionPending=false;
-                    state.status.voiceRoomAdmitted=false;
+                    state.status.developmentAdmissionPending=false;
+                    state.status.developmentAdmitted=false;
                     state.status.localMemberId.clear();
                     state.authorizedPeers.clear();
-                    state.status.authorizedPeerCount=0;
-                    state.status.status = "Embedded signaling returned an error";
+                    state.status.developmentPeerCount=0;
+                    state.status.status="Embedded signaling returned an error";
                     break;
                 case SignalingEventType::PeerLeft:
                     if(!event.payload.empty()) {
                         state.authorizedPeers.erase(event.payload);
-                        state.status.authorizedPeerCount=
+                        state.status.developmentPeerCount=
                             static_cast<std::uint32_t>(state.authorizedPeers.size());
                     }
                     break;

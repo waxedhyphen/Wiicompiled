@@ -27,12 +27,12 @@ struct EmbeddedVoiceSessionInput {
 struct EmbeddedVoiceSessionStatus {
     bool lifecycleActive = false;
     bool signalingConnected = false;
-    bool authorizationPending = false;
-    bool roomAuthorized = false;
-    bool voiceRoomAdmissionPending = false;
-    bool voiceRoomAdmitted = false;
+    bool productionAuthorizationPending = false;
+    bool productionAuthorized = false;
+    bool developmentAdmissionPending = false;
+    bool developmentAdmitted = false;
     bool voiceClientRunning = false;
-    std::uint32_t authorizedPeerCount = 0;
+    std::uint32_t developmentPeerCount = 0;
     std::uint32_t peerCount = 0;
     std::string roomInstanceId;
     std::string localMemberId;
