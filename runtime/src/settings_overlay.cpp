@@ -977,8 +977,10 @@ void DrawVoiceChatSettings() {
     ImGui::Text("Lifecycle: %s", session.lifecycleActive ? "Active" : "Inactive");
     ImGui::Text("Core signaling: %s",
                 session.signalingConnected ? "Connected" : "Not connected");
-    ImGui::Text("RR admission: %s",
-                session.roomAuthorized ? "Authorized" : "Blocked");
+    const char* admission = session.roomAuthorized
+        ? "Authorized"
+        : (session.authorizationPending ? "Authenticating" : "Blocked");
+    ImGui::Text("RR admission: %s", admission);
     ImGui::Text("VoiceClient: %s",
                 session.voiceClientRunning ? "Running" : "Stopped");
     ImGui::Text("Peers: %u", session.peerCount);

@@ -19,6 +19,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -42,6 +43,7 @@ struct EmbeddedVoiceSessionState {
     mkwvc::EmbeddedVoiceSessionStatus status;
     std::string profileId;
     std::string roomInstanceId;
+    std::uint64_t identityGeneration = 0;
     std::chrono::steady_clock::time_point nextReconnect{};
 };
 
@@ -54,9 +56,33 @@ void clearVoiceSessionLocked(EmbeddedVoiceSessionState& state, std::string statu
     state.signaling.reset();
     state.profileId.clear();
     state.roomInstanceId.clear();
+    state.identityGeneration = 0;
     state.nextReconnect = {};
     state.status = {};
     state.status.status = std::move(status);
+}
+
+std::vector<std::string_view> splitLines(std::string_view value) {
+    std::vector<std::string_view> lines;
+    while (true) {
+        const auto end = value.find('\n');
+        lines.push_back(value.substr(0, end));
+        if (end == std::string_view::npos) {
+            break;
+        }
+        value.remove_prefix(end + 1);
+    }
+    return lines;
+}
+
+bool matchesAuthorizedRoom(
+    std::string_view payload,
+    std::string_view profileId,
+    std::string_view roomInstanceId) {
+    const auto lines = splitLines(payload);
+    return lines.size() >= 3 &&
+           lines[0] == profileId &&
+           lines[2] == roomInstanceId;
 }
 
 }
@@ -96,6 +122,7 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
         }
 
         const bool roomChanged =
+            state.identityGeneration != input.identityGeneration ||
             state.profileId != input.profileId ||
             state.roomInstanceId != input.roomInstanceId;
 
@@ -103,12 +130,12 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
             state.signaling.reset();
             state.profileId = input.profileId;
             state.roomInstanceId = input.roomInstanceId;
+            state.identityGeneration = input.identityGeneration;
             state.nextReconnect = {};
             state.status = {};
         }
 
         state.status.lifecycleActive = true;
-        state.status.roomAuthorized = input.roomAuthorized;
         state.status.roomInstanceId = input.roomInstanceId;
         state.status.voiceClientRunning = false;
         state.status.peerCount = 0;
@@ -121,10 +148,14 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
                 state.signaling =
                     std::make_unique<SignalingClient>(std::string(kSignalingUrl));
                 state.status.signalingConnected = false;
+                state.status.authorizationPending = false;
+                state.status.roomAuthorized = false;
                 state.status.status = "Connecting embedded signaling...";
             } catch (...) {
                 state.nextReconnect = now + kReconnectDelay;
                 state.status.signalingConnected = false;
+                state.status.authorizationPending = false;
+                state.status.roomAuthorized = false;
                 state.status.status = "Embedded signaling failed; retrying";
             }
         }
@@ -140,17 +171,57 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
             switch (event.type) {
                 case SignalingEventType::Open:
                     state.status.signalingConnected = true;
-                    state.status.status = input.roomAuthorized
-                        ? "RR admission authorized; peer orchestration pending"
-                        : "Core signaling connected; verified RR admission required";
+                    state.status.roomAuthorized = false;
+                    if (input.sessionKey.empty() || input.gameName.empty()) {
+                        state.status.authorizationPending = false;
+                        state.status.status = "Live RR credentials unavailable";
+                        break;
+                    }
+                    try {
+                        state.signaling->authenticateRetroRewind(
+                            input.profileId,
+                            input.sessionKey,
+                            input.gameName);
+                        state.status.authorizationPending = true;
+                        state.status.status = "Authenticating live RR session...";
+                    } catch (...) {
+                        state.status.authorizationPending = false;
+                        state.status.status = "Failed to submit RR authentication";
+                    }
+                    break;
+                case SignalingEventType::RetroRewindStatus:
+                    state.status.authorizationPending = false;
+                    state.status.roomAuthorized = matchesAuthorizedRoom(
+                        event.payload,
+                        input.profileId,
+                        input.roomInstanceId);
+                    state.status.status = state.status.roomAuthorized
+                        ? "RR room authorized; peer orchestration pending"
+                        : "Verified RR room does not match local room instance";
+                    break;
+                case SignalingEventType::RetroRewindAuthFailed:
+                    state.status.authorizationPending = false;
+                    state.status.roomAuthorized = false;
+                    state.status.status = event.payload.empty()
+                        ? "RR voice admission failed"
+                        : "RR admission failed: " + event.payload;
+                    break;
+                case SignalingEventType::RetroRewindAuthRequired:
+                    state.status.authorizationPending = false;
+                    state.status.roomAuthorized = false;
+                    state.status.status = "RR voice admission expired";
                     break;
                 case SignalingEventType::TransportError:
                 case SignalingEventType::Closed:
                     state.status.signalingConnected = false;
+                    state.status.authorizationPending = false;
+                    state.status.roomAuthorized = false;
                     state.status.status = "Embedded signaling disconnected; retrying";
                     reconnect = true;
                     break;
                 case SignalingEventType::Error:
+                    state.status.authorizationPending = false;
+                    state.status.roomAuthorized = false;
                     state.status.status = "Embedded signaling returned an error";
                     break;
                 default:

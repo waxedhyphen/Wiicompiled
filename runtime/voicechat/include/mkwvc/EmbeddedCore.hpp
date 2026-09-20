@@ -17,14 +17,17 @@ struct EmbeddedCoreStatus {
 struct EmbeddedVoiceSessionInput {
     bool localRoomActive = false;
     bool roomFound = false;
-    bool roomAuthorized = false;
     std::string profileId;
+    std::string sessionKey;
+    std::string gameName;
     std::string roomInstanceId;
+    std::uint64_t identityGeneration = 0;
 };
 
 struct EmbeddedVoiceSessionStatus {
     bool lifecycleActive = false;
     bool signalingConnected = false;
+    bool authorizationPending = false;
     bool roomAuthorized = false;
     bool voiceClientRunning = false;
     std::uint32_t peerCount = 0;

@@ -1112,9 +1112,11 @@ void ServiceRoomLookup() noexcept {
         mkwvc::EmbeddedVoiceSessionInput voiceInput;
         voiceInput.localRoomActive = room.localRoomActive;
         voiceInput.roomFound = room.roomFound;
-        voiceInput.roomAuthorized = room.voiceAuthorized;
         voiceInput.profileId = identity.profileId;
+        voiceInput.sessionKey = identity.sessionKey;
+        voiceInput.gameName = identity.gameName;
         voiceInput.roomInstanceId = room.roomInstanceId;
+        voiceInput.identityGeneration = identity.generation;
         mkwvc::serviceEmbeddedVoiceSession(voiceInput);
     } catch (...) {
     }
