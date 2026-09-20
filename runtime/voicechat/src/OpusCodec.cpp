@@ -1,7 +1,13 @@
 #include "mkwvc/OpusCodec.hpp"
 #include "mkwvc/VoiceFormat.hpp"
 
+#if __has_include(<opus/opus.h>)
 #include <opus/opus.h>
+#elif __has_include(<opus.h>)
+#include <opus.h>
+#else
+#error "Opus headers were not found"
+#endif
 
 #include <algorithm>
 #include <stdexcept>
