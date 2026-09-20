@@ -528,6 +528,7 @@ void FinishRoomWorker(std::uint64_t generation, std::string status,
         state.workerRunning = false;
         state.workerIdentityGeneration = UINT64_MAX;
         state.snapshot.lookupInFlight = false;
+        state.snapshot.signalingConnected = false;
 
         if (state.desiredOnline && state.desiredIdentityGeneration == generation) {
             if (!status.empty()) {
@@ -624,6 +625,18 @@ void PersistentRoomWorker(std::string profileId, std::uint64_t generation) {
         sizeof(closeTimeoutMs));
 
     RoomLookupState& state = RoomState();
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        if (state.desiredOnline &&
+            state.desiredIdentityGeneration == generation) {
+            state.snapshot.signalingConnected = true;
+            state.snapshot.status = state.desiredRoomActive
+                ? "Voice signaling connected; registering presence..."
+                : "Voice signaling connected; waiting for RKNet room";
+        }
+    }
+    state.wake.notify_all();
+
     std::atomic<bool> connectionAlive{true};
     std::atomic<DWORD> sendFailure{ERROR_SUCCESS};
     std::atomic<std::uint64_t> receivedReplies{0};
@@ -676,6 +689,17 @@ void PersistentRoomWorker(std::string profileId, std::uint64_t generation) {
             }
 
             presenceRegistered = command.rfind("RR_DEBUG_PRESENCE ", 0) == 0;
+            {
+                std::lock_guard<std::mutex> lock(state.mutex);
+                if (state.desiredIdentityGeneration == generation) {
+                    state.snapshot.signalingConnected = true;
+                    state.snapshot.presenceFrameSent = presenceRegistered;
+                    if (!presenceRegistered) {
+                        state.snapshot.signalingReplyReceived = false;
+                    }
+                }
+            }
+            state.wake.notify_all();
             return true;
         };
 
@@ -825,6 +849,9 @@ void PersistentRoomWorker(std::string profileId, std::uint64_t generation) {
         RoomSnapshot result = ParseRoomReply(message, profileId);
         {
             std::lock_guard<std::mutex> lock(state.mutex);
+            result.signalingConnected = true;
+            result.presenceFrameSent = state.snapshot.presenceFrameSent;
+            result.signalingReplyReceived = true;
             ApplyRoomResultLocked(state, std::move(result), generation);
         }
         receivedReplies.fetch_add(1, std::memory_order_release);
@@ -1045,6 +1072,9 @@ void ServiceRoomLookup() noexcept {
                            now >= state.nextReconnectAttempt) {
                     state.workerRunning = true;
                     state.workerIdentityGeneration = identity.generation;
+                    state.snapshot.signalingConnected = false;
+                    state.snapshot.presenceFrameSent = false;
+                    state.snapshot.signalingReplyReceived = false;
                     state.snapshot.lookupInFlight = localRoomActive;
                     state.snapshot.localRoomActive = localRoomActive;
                     state.snapshot.identityGeneration = identity.generation;
