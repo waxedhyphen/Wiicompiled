@@ -978,13 +978,6 @@ void DrawVoiceChatSettings() {
         ImGui::TextDisabled(
             "Public RWFC roster discovery only; this is not secure voice authorization yet.");
     }
-    // Background verification runs independently. This remains a true manual
-    // refresh control and does not visually toggle itself every few seconds.
-    ImGui::BeginDisabled(!identity.online);
-    if (ImGui::Button("Refresh RR room")) {
-        RetroRewindVoiceBridge::RequestRoomLookup();
-    }
-    ImGui::EndDisabled();
 }
 
 void DrawAudioSettings() {
