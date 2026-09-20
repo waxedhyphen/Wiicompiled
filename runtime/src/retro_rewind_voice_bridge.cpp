@@ -686,6 +686,39 @@ void PersistentRoomWorker(std::string profileId, std::uint64_t generation) {
 
 constexpr auto kRoomReconnectDelay = std::chrono::seconds(5);
 
+void FinishRoomWorker(std::uint64_t generation, std::string status,
+                      bool reconnect) {
+    RoomLookupState& state = RoomState();
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        if (state.workerIdentityGeneration != generation) {
+            return;
+        }
+
+        state.workerRunning = false;
+        state.workerIdentityGeneration = UINT64_MAX;
+        state.snapshot.lookupInFlight = false;
+
+        if (state.desiredOnline && state.desiredIdentityGeneration == generation) {
+            if (!status.empty()) {
+                state.snapshot.lookupComplete = true;
+                if (state.snapshot.roomFound) {
+                    state.snapshot.status =
+                        "Room still active; signaling connection will reconnect";
+                } else {
+                    state.snapshot.status = std::move(status);
+                }
+            }
+            state.nextReconnectAttempt = reconnect
+                ? std::chrono::steady_clock::now() + kRoomReconnectDelay
+                : std::chrono::steady_clock::time_point{};
+        } else {
+            state.nextReconnectAttempt = {};
+        }
+    }
+    state.wake.notify_all();
+}
+
 void PersistentRoomWorker(std::string, std::uint64_t generation) {
     FinishRoomWorker(generation,
                      "RR signaling presence is not implemented on this host platform yet",
