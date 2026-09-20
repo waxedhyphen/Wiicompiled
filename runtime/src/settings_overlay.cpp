@@ -943,6 +943,8 @@ void DrawControllerSettings() {
 void DrawVoiceChatSettings() {
     const RetroRewindVoiceBridge::IdentitySnapshot identity =
         RetroRewindVoiceBridge::Snapshot();
+    const RetroRewindVoiceBridge::RoomSnapshot room =
+        RetroRewindVoiceBridge::Room();
 
     ImGui::TextUnformatted("Retro Rewind voice integration");
     ImGui::SeparatorText("Live GPCM identity");
@@ -961,8 +963,23 @@ void DrawVoiceChatSettings() {
         "The session key stays in memory only and is never written to Config.toml or logs.");
 
     ImGui::SeparatorText("Voice room");
-    ImGui::TextDisabled(
-        "Automatic RR room lookup and VoiceSession binding are the next integration step.");
+    ImGui::Text("Lookup: %s", room.status.empty() ? "-" : room.status.c_str());
+    if (room.roomFound) {
+        ImGui::Text("Room ID: %s", room.roomId.c_str());
+        ImGui::Text("Room instance: %s", room.roomInstanceId.c_str());
+        ImGui::Text("Created: %s", room.created.c_str());
+        ImGui::Text("Players: %zu", room.players.size());
+        for (const auto& player : room.players) {
+            ImGui::BulletText("%s (PID %s)", player.name.c_str(), player.profileId.c_str());
+        }
+        ImGui::TextDisabled(
+            "Public RWFC roster discovery only; this is not secure voice authorization yet.");
+    }
+    ImGui::BeginDisabled(!identity.online || room.lookupInFlight);
+    if (ImGui::Button(room.lookupInFlight ? "Looking up..." : "Refresh RR room")) {
+        RetroRewindVoiceBridge::RequestRoomLookup();
+    }
+    ImGui::EndDisabled();
 }
 
 void DrawAudioSettings() {
@@ -1481,6 +1498,9 @@ void Draw() noexcept {
     ApplyConfiguredMappings();
     PersistDisplayModeIfChanged();
     UpdateCursorAutoHide();
+    if (RuntimeProduct::IsRetroRewind()) {
+        RetroRewindVoiceBridge::ServiceRoomLookup();
+    }
     if (!StartupScreenVisible()) {
         DrawShaderCompilationStatus();
     }
