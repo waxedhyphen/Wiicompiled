@@ -32,6 +32,7 @@ IdentitySnapshot Snapshot();
 struct RoomPlayer {
     std::string profileId;
     std::string name;
+    bool voiceChat = false;
 };
 
 struct RoomSnapshot {
@@ -48,9 +49,10 @@ struct RoomSnapshot {
     std::uint64_t identityGeneration = 0;
 };
 
-// Called from the host runtime once per presented frame. A new live GPCM
-// identity automatically triggers one non-blocking room lookup. No network I/O
-// is ever performed on the game/UI thread.
+// Called from the host runtime once per presented frame. A live GPCM identity
+// keeps one persistent signaling WebSocket alive in a background worker. Room
+// presence is refreshed periodically over that same socket, and Worker-pushed
+// presence updates are consumed without network I/O on the game/UI thread.
 void ServiceRoomLookup() noexcept;
 void RequestRoomLookup() noexcept;
 RoomSnapshot Room();
