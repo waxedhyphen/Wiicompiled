@@ -43,7 +43,6 @@ IdentitySnapshot g_identity;
 std::uint32_t g_identitySocket = UINT32_MAX;
 
 constexpr std::size_t kMaxRoomReplyBytes = 64 * 1024;
-constexpr unsigned kRoomLeaveConfirmations = 3;
 
 struct RoomLookupState {
     std::mutex mutex;
@@ -55,8 +54,6 @@ struct RoomLookupState {
     std::string desiredProfileId;
     bool desiredOnline = false;
     bool workerRunning = false;
-    bool manualRefreshRequested = false;
-    unsigned consecutiveRoomMisses = 0;
     std::chrono::steady_clock::time_point nextReconnectAttempt{};
 };
 
@@ -406,37 +403,23 @@ void ApplyRoomResultLocked(RoomLookupState& state, RoomSnapshot result,
         state.snapshot.roomFound &&
         state.snapshot.identityGeneration == generation;
 
-    if (result.lookupSucceeded && result.roomFound) {
-        // Positive room evidence immediately accepts joins and room switches.
+    if (result.lookupSucceeded) {
+        // A structurally valid Worker roster result is real room-state evidence.
+        // If our PID is no longer in a room, leave the voice room immediately
+        // instead of keeping stale peers audible in the lobby. This is distinct
+        // from a transport failure below (for example a Wi-Fi interruption),
+        // where no valid roster result exists and the last confirmed room is
+        // deliberately preserved for reconnect.
         state.snapshot = std::move(result);
-        state.consecutiveRoomMisses = 0;
-    } else if (result.lookupSucceeded && !result.roomFound && hadConfirmedRoom) {
-        // Public roster transitions can briefly omit a participant. Three
-        // consecutive structurally valid misses are required before clearing
-        // an already confirmed room.
-        ++state.consecutiveRoomMisses;
-        if (state.consecutiveRoomMisses >= kRoomLeaveConfirmations) {
-            state.snapshot = std::move(result);
-            state.consecutiveRoomMisses = 0;
-        } else {
-            state.snapshot.lookupInFlight = false;
-            state.snapshot.lookupComplete = true;
-            state.snapshot.status =
-                "Room still active; background verification miss " +
-                std::to_string(state.consecutiveRoomMisses) + "/" +
-                std::to_string(kRoomLeaveConfirmations);
-        }
-    } else if (!result.lookupSucceeded && hadConfirmedRoom) {
-        // A Worker/network/parser failure is not evidence of a room leave.
+    } else if (hadConfirmedRoom) {
+        // Worker/network/parser failures are not proof that the player left the
+        // RR room. Preserve the last confirmed room while signaling reconnects.
         state.snapshot.lookupInFlight = false;
         state.snapshot.lookupComplete = true;
         state.snapshot.status =
-            "Room still active; background verification temporarily unavailable";
+            "Room preserved while voice signaling reconnects";
     } else {
         state.snapshot = std::move(result);
-        if (state.snapshot.lookupSucceeded) {
-            state.consecutiveRoomMisses = 0;
-        }
     }
 }
 
@@ -553,8 +536,8 @@ void PersistentRoomWorker(std::string profileId, std::uint64_t generation) {
 
     // WinHTTP explicitly permits one WebSocket sender and one receiver to run
     // concurrently. The receiver below consumes Worker-pushed presence updates;
-    // this sender handles the initial registration, 30-second verification and
-    // manual refresh requests without touching the game/UI thread.
+    // this sender handles the initial registration and periodic verification
+    // without touching the game/UI thread.
     std::thread sender([&]() {
         const auto sendPresence = [&]() -> bool {
             {
@@ -599,19 +582,13 @@ void PersistentRoomWorker(std::string profileId, std::uint64_t generation) {
                 state.wake.wait_for(lock, kRoomPresenceRefreshInterval, [&]() {
                     return !connectionAlive.load(std::memory_order_acquire) ||
                            !state.desiredOnline ||
-                           state.desiredIdentityGeneration != generation ||
-                           state.manualRefreshRequested;
+                           state.desiredIdentityGeneration != generation;
                 });
 
                 stop =
                     !connectionAlive.load(std::memory_order_acquire) ||
                     !state.desiredOnline ||
                     state.desiredIdentityGeneration != generation;
-
-                if (!stop) {
-                    // Multiple manual clicks collapse into one immediate refresh.
-                    state.manualRefreshRequested = false;
-                }
             }
 
             if (stop) {
@@ -798,7 +775,6 @@ void ServiceRoomLookup() noexcept {
 
             if (!state.desiredOnline) {
                 notifyWorker = state.workerRunning;
-                state.manualRefreshRequested = false;
                 state.nextReconnectAttempt = {};
 
                 if (state.observedIdentityGeneration != identity.generation ||
@@ -809,17 +785,14 @@ void ServiceRoomLookup() noexcept {
                     state.snapshot = {};
                     state.snapshot.identityGeneration = identity.generation;
                     state.snapshot.status = "Waiting for live Retro Rewind identity";
-                    state.consecutiveRoomMisses = 0;
-                }
+                    }
             } else {
                 const bool identityChanged =
                     state.observedIdentityGeneration != identity.generation;
 
                 if (identityChanged) {
                     state.observedIdentityGeneration = identity.generation;
-                    state.consecutiveRoomMisses = 0;
-                    state.manualRefreshRequested = false;
-                    state.nextReconnectAttempt = {};
+                            state.nextReconnectAttempt = {};
 
                     // Never carry a confirmed room from an old GPCM session into
                     // a new identity generation.
@@ -837,8 +810,7 @@ void ServiceRoomLookup() noexcept {
                            now >= state.nextReconnectAttempt) {
                     state.workerRunning = true;
                     state.workerIdentityGeneration = identity.generation;
-                    state.manualRefreshRequested = false;
-                    state.snapshot.lookupInFlight = true;
+                        state.snapshot.lookupInFlight = true;
                     state.snapshot.identityGeneration = identity.generation;
                     state.snapshot.profileId = identity.profileId;
                     if (!state.snapshot.lookupComplete && !state.snapshot.roomFound) {
@@ -870,23 +842,6 @@ void ServiceRoomLookup() noexcept {
     }
 }
 
-void RequestRoomLookup() noexcept {
-    try {
-        const IdentitySnapshot identity = Snapshot();
-        if (!identity.online || identity.profileId.empty()) {
-            return;
-        }
-
-        RoomLookupState& state = RoomState();
-        {
-            std::lock_guard<std::mutex> lock(state.mutex);
-            state.manualRefreshRequested = true;
-            state.nextReconnectAttempt = {};
-        }
-        state.wake.notify_all();
-    } catch (...) {
-    }
-}
 
 RoomSnapshot Room() {
     RoomLookupState& state = RoomState();
