@@ -971,6 +971,20 @@ void DrawVoiceChatSettings() {
     ImGui::TextDisabled("%u Hz mono, %u ms frames (%u samples)",
                         core.sampleRate, core.frameDurationMs, core.frameSamples);
 
+    const mkwvc::EmbeddedVoiceSessionStatus session =
+        mkwvc::embeddedVoiceSessionStatus();
+    ImGui::SeparatorText("In-process voice session");
+    ImGui::Text("Lifecycle: %s", session.lifecycleActive ? "Active" : "Inactive");
+    ImGui::Text("Core signaling: %s",
+                session.signalingConnected ? "Connected" : "Not connected");
+    ImGui::Text("RR admission: %s",
+                session.roomAuthorized ? "Authorized" : "Blocked");
+    ImGui::Text("VoiceClient: %s",
+                session.voiceClientRunning ? "Running" : "Stopped");
+    ImGui::Text("Peers: %u", session.peerCount);
+    ImGui::Text("Session: %s",
+                session.status.empty() ? "-" : session.status.c_str());
+
     ImGui::SeparatorText("Voice room");
     ImGui::Text("Local RKNet room: %s", room.localRoomActive ? "Active" : "Inactive");
     ImGui::Text("Signaling socket: %s", room.signalingConnected ? "Connected" : "Not connected");

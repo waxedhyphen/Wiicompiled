@@ -41,6 +41,7 @@ struct RoomSnapshot {
     bool lookupSucceeded = false;
     bool localRoomActive = false;
     bool roomFound = false;
+    bool voiceAuthorized = false;
     bool signalingConnected = false;
     bool presenceFrameSent = false;
     bool signalingReplyReceived = false;

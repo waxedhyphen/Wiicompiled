@@ -100,6 +100,7 @@ add_subdirectory(
 set(CMAKE_DISABLE_FIND_PACKAGE_Python3 FALSE CACHE BOOL "" FORCE)
 set(Python3_Interpreter_FOUND "${_MKWVC_SAVED_PYTHON3_FOUND}")
 set(Python3_EXECUTABLE "${_MKWVC_SAVED_PYTHON3_EXECUTABLE}")
+target_compile_definitions(mbedtls PUBLIC MBEDTLS_SSL_DTLS_SRTP)
 if(TARGET mbedtls AND NOT TARGET MbedTLS::MbedTLS)
     add_library(MbedTLS::MbedTLS ALIAS mbedtls)
 endif()

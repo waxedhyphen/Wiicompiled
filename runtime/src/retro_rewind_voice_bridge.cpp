@@ -2,6 +2,7 @@
 
 #include "runtime_product.h"
 #include "memory.h"
+#include "mkwvc/EmbeddedCore.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1106,6 +1107,15 @@ void ServiceRoomLookup() noexcept {
                     true);
             }
         }
+
+        const RoomSnapshot room = Room();
+        mkwvc::EmbeddedVoiceSessionInput voiceInput;
+        voiceInput.localRoomActive = room.localRoomActive;
+        voiceInput.roomFound = room.roomFound;
+        voiceInput.roomAuthorized = room.voiceAuthorized;
+        voiceInput.profileId = identity.profileId;
+        voiceInput.roomInstanceId = room.roomInstanceId;
+        mkwvc::serviceEmbeddedVoiceSession(voiceInput);
     } catch (...) {
     }
 }
