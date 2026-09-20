@@ -2,7 +2,13 @@
 #include "mkwvc/VoiceFormat.hpp"
 
 #include <miniaudio.h>
+#if __has_include(<opus/opus.h>)
 #include <opus/opus.h>
+#elif __has_include(<opus.h>)
+#include <opus.h>
+#else
+#error "Opus headers were not found"
+#endif
 #include <speex/speex_preprocess.h>
 
 namespace {
