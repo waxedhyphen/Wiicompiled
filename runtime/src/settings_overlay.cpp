@@ -970,7 +970,10 @@ void DrawVoiceChatSettings() {
         ImGui::Text("Created: %s", room.created.c_str());
         ImGui::Text("Players: %zu", room.players.size());
         for (const auto& player : room.players) {
-            ImGui::BulletText("%s (PID %s)", player.name.c_str(), player.profileId.c_str());
+            ImGui::BulletText("%s (PID %s)%s",
+                              player.name.c_str(),
+                              player.profileId.c_str(),
+                              player.voiceChat ? " [Voice Chat]" : "");
         }
         ImGui::TextDisabled(
             "Public RWFC roster discovery only; this is not secure voice authorization yet.");
