@@ -237,9 +237,8 @@ endif()
 
 # MKW VoiceChat integration sources are kept outside runtime/src so the
 # translator/native-source scan never mistakes host-only voice code for guest
-# native overrides. Stage 2 compiles the existing VoiceClient/audio/Opus path with the shipped toolchain
-# with installer-provisioned pinned dependencies; libdatachannel/ICE remains
-# the next stage.
+# native overrides. Stage 3 compiles the existing VoiceClient/audio/signaling/ICE path with the shipped toolchain
+# with installer-provisioned pinned dependencies including libdatachannel.
 if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/voicechat/CMakeLists.txt")
     add_subdirectory(voicechat)
 endif()
