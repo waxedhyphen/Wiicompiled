@@ -1,4 +1,5 @@
 #include "network_internal.h"
+#include "retro_rewind_voice_bridge.h"
 
 namespace NetworkHle {
 
@@ -27,6 +28,7 @@ static int32_t DeleteWiiSocket(uint32_t fd) {
         return -SO_EBADF;
     }
     ClearSslSessionsForSocket(fd);
+    RetroRewindVoiceBridge::OnSocketClosed(fd, s->peerPort);
     CloseNativeSocket(s->native);
     *s = {};
     s->native = kInvalidSocket;
@@ -464,6 +466,7 @@ int32_t HandleIpTopIoctlv(uint32_t cmd, const std::vector<IoVector>& in, const s
         const bool patchedWrite = nasAction == NasSslWriteAction::Ready;
         const uint8_t* sendData = patchedWrite ? patched.data() : data;
         const uint32_t sendSize = patchedWrite ? static_cast<uint32_t>(patched.size()) : in[0].size;
+        RetroRewindVoiceBridge::ObserveGpcmSend(fd, s->peerPort, sendData, sendSize);
         const int ret = sendto(s->native, reinterpret_cast<const char*>(sendData), static_cast<int>(sendSize),
                                static_cast<int>(flags), destPtr, destLen);
         const int hostError = ret < 0 ? NativeLastError() : 0;
@@ -512,6 +515,11 @@ int32_t HandleIpTopIoctlv(uint32_t cmd, const std::vector<IoVector>& in, const s
             nativeErr = ret < 0 ? NativeLastError() : 0;
         }
 
+        if (ret > 0) {
+            RetroRewindVoiceBridge::ObserveGpcmReceive(
+                fd, s->peerPort, reinterpret_cast<const uint8_t*>(data),
+                static_cast<std::size_t>(ret));
+        }
         if (ret >= 0 && fromPtr) {
             WriteWiiSockAddr(out[1].address, from, static_cast<uint32_t>(fromLen));
         }
