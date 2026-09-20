@@ -963,6 +963,7 @@ void DrawVoiceChatSettings() {
         "The session key stays in memory only and is never written to Config.toml or logs.");
 
     ImGui::SeparatorText("Voice room");
+    ImGui::Text("Local RKNet room: %s", room.localRoomActive ? "Active" : "Inactive");
     ImGui::Text("Lookup: %s", room.status.empty() ? "-" : room.status.c_str());
     if (room.roomFound) {
         ImGui::Text("Room ID: %s", room.roomId.c_str());
