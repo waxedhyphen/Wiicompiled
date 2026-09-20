@@ -1,0 +1,34 @@
+#pragma once
+
+#include "mkwvc/VoiceFormat.hpp"
+
+#include <cstdint>
+#include <memory>
+#include <span>
+
+namespace mkwvc {
+
+struct AudioProcessingSettings {
+    bool normalization=true;
+    bool noiseSuppression=true;
+    int noiseSuppressionStrength=50;
+};
+
+class AudioProcessor {
+public:
+    AudioProcessor();
+    ~AudioProcessor();
+
+    AudioProcessor(const AudioProcessor&)=delete;
+    AudioProcessor& operator=(const AudioProcessor&)=delete;
+
+    void setSettings(const AudioProcessingSettings& settings);
+    AudioProcessingSettings settings() const;
+    void processCapture(std::span<std::int16_t> samples);
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+}
