@@ -406,6 +406,7 @@ RoomSnapshot ParseRoomReply(const std::string& message, std::string_view expecte
 #if defined(_WIN32)
 
 constexpr auto kRoomPresenceRefreshInterval = std::chrono::seconds(30);
+constexpr auto kRoomPresenceReplyTimeout = std::chrono::seconds(5);
 constexpr auto kRoomReconnectDelay = std::chrono::seconds(5);
 
 std::string WinHttpError(const char* operation, DWORD error = GetLastError()) {
@@ -625,6 +626,8 @@ void PersistentRoomWorker(std::string profileId, std::uint64_t generation) {
     RoomLookupState& state = RoomState();
     std::atomic<bool> connectionAlive{true};
     std::atomic<DWORD> sendFailure{ERROR_SUCCESS};
+    std::atomic<std::uint64_t> receivedReplies{0};
+    std::atomic<bool> roomReplyTimedOut{false};
 
     // WinHTTP explicitly permits one WebSocket sender and one receiver to run
     // concurrently. The receiver below consumes Worker-pushed presence updates;
@@ -676,8 +679,88 @@ void PersistentRoomWorker(std::string profileId, std::uint64_t generation) {
             return true;
         };
 
+        const auto waitForRoomReply = [&](std::uint64_t before) -> bool {
+            std::unique_lock<std::mutex> lock(state.mutex);
+            state.wake.wait_for(lock, kRoomPresenceReplyTimeout, [&]() {
+                return !connectionAlive.load(std::memory_order_acquire) ||
+                       !state.desiredOnline ||
+                       state.desiredIdentityGeneration != generation ||
+                       !state.desiredRoomActive ||
+                       receivedReplies.load(std::memory_order_acquire) != before;
+            });
+            return receivedReplies.load(std::memory_order_acquire) != before;
+        };
+
+        const std::uint64_t firstReply = receivedReplies.load(std::memory_order_acquire);
         if (!sendPresence()) {
             return;
+        }
+
+        // A second client can already see this PID as [Voice Chat] as soon as
+        // RR_DEBUG_PRESENCE reached the Worker. If the local socket never
+        // consumes the matching RR_DEBUG_STATUS, do one explicit lookup and
+        // then reconnect instead of sitting forever on "verifying presence".
+        if (presenceRegistered && !waitForRoomReply(firstReply)) {
+            bool stillWaiting = false;
+            {
+                std::lock_guard<std::mutex> lock(state.mutex);
+                stillWaiting =
+                    connectionAlive.load(std::memory_order_acquire) &&
+                    state.desiredOnline &&
+                    state.desiredIdentityGeneration == generation &&
+                    state.desiredRoomActive;
+                if (stillWaiting) {
+                    state.snapshot.status =
+                        "Voice presence registered; room reply delayed, retrying...";
+                }
+            }
+
+            if (stillWaiting) {
+                const std::uint64_t retryReply =
+                    receivedReplies.load(std::memory_order_acquire);
+                const std::string retryCommand =
+                    "RR_DEBUG_LOOKUP " + profileId;
+                const DWORD retryError =
+                    SendWebSocketText(socket.value, retryCommand);
+                if (retryError != ERROR_SUCCESS) {
+                    sendFailure.store(retryError, std::memory_order_release);
+                    connectionAlive.store(false, std::memory_order_release);
+                    state.wake.notify_all();
+                    (void)WinHttpWebSocketShutdown(
+                        socket.value,
+                        WINHTTP_WEB_SOCKET_ENDPOINT_TERMINATED_CLOSE_STATUS,
+                        nullptr,
+                        0);
+                    return;
+                }
+
+                if (!waitForRoomReply(retryReply)) {
+                    {
+                        std::lock_guard<std::mutex> lock(state.mutex);
+                        stillWaiting =
+                            connectionAlive.load(std::memory_order_acquire) &&
+                            state.desiredOnline &&
+                            state.desiredIdentityGeneration == generation &&
+                            state.desiredRoomActive;
+                        if (stillWaiting) {
+                            state.snapshot.status =
+                                "Voice room reply timed out; reconnecting signaling...";
+                        }
+                    }
+
+                    if (stillWaiting) {
+                        roomReplyTimedOut.store(true, std::memory_order_release);
+                        connectionAlive.store(false, std::memory_order_release);
+                        state.wake.notify_all();
+                        (void)WinHttpWebSocketShutdown(
+                            socket.value,
+                            WINHTTP_WEB_SOCKET_ENDPOINT_TERMINATED_CLOSE_STATUS,
+                            nullptr,
+                            0);
+                        return;
+                    }
+                }
+            }
         }
 
         while (connectionAlive.load(std::memory_order_acquire)) {
@@ -740,8 +823,12 @@ void PersistentRoomWorker(std::string profileId, std::uint64_t generation) {
         }
 
         RoomSnapshot result = ParseRoomReply(message, profileId);
-        std::lock_guard<std::mutex> lock(state.mutex);
-        ApplyRoomResultLocked(state, std::move(result), generation);
+        {
+            std::lock_guard<std::mutex> lock(state.mutex);
+            ApplyRoomResultLocked(state, std::move(result), generation);
+        }
+        receivedReplies.fetch_add(1, std::memory_order_release);
+        state.wake.notify_all();
     }
 
     state.wake.notify_all();
@@ -752,6 +839,8 @@ void PersistentRoomWorker(std::string profileId, std::uint64_t generation) {
     const DWORD failedSend = sendFailure.load(std::memory_order_acquire);
     if (failedSend != ERROR_SUCCESS) {
         terminalStatus = WinHttpError("WinHttpWebSocketSend", failedSend);
+    } else if (roomReplyTimedOut.load(std::memory_order_acquire)) {
+        terminalStatus = "Voice signaling room reply timed out";
     }
 
     {
