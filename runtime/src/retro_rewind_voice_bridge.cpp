@@ -157,7 +157,12 @@ void FeedLocked(std::uint32_t wiiFd, std::string& buffer,
 }
 
 bool ShouldObserve(std::uint16_t peerPort) {
-    return RuntimeProduct::IsRetroRewind() && peerPort == kGpcmPort;
+    // Some GameSpy sockets are nonblocking and can exchange their first packet
+    // before the HLE has recorded the connected peer port. Accept port 0 as an
+    // unknown-yet candidate; the parser still requires the exact GPCM login
+    // message shape before it captures anything.
+    return RuntimeProduct::IsRetroRewind() &&
+           (peerPort == 0 || peerPort == kGpcmPort);
 }
 
 } // namespace
@@ -194,7 +199,8 @@ void ObserveGpcmReceive(std::uint32_t wiiFd, std::uint16_t peerPort,
 }
 
 void OnSocketClosed(std::uint32_t wiiFd, std::uint16_t peerPort) noexcept {
-    if (!ShouldObserve(peerPort)) {
+    (void)peerPort;
+    if (!RuntimeProduct::IsRetroRewind()) {
         return;
     }
 
