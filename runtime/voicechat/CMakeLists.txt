@@ -82,10 +82,24 @@ set(GEN_FILES OFF CACHE BOOL "" FORCE)
 set(USE_STATIC_MBEDTLS_LIBRARY ON CACHE BOOL "" FORCE)
 set(USE_SHARED_MBEDTLS_LIBRARY OFF CACHE BOOL "" FORCE)
 set(DISABLE_PACKAGE_CONFIG_AND_INSTALL ON CACHE BOOL "" FORCE)
+# The release archive intentionally omits mbedtls-framework. With GEN_FILES
+# off, the library build does not need it; suppress Mbed TLS' optional Python
+# config-warning probe so scripts/config.py never imports the absent framework.
+# Python may already have been found by WiiCompiled/Aurora, so hide both the
+# package lookup and any inherited result while Mbed TLS configures.
+set(_MKWVC_SAVED_PYTHON3_FOUND "${Python3_Interpreter_FOUND}")
+set(_MKWVC_SAVED_PYTHON3_EXECUTABLE "${Python3_EXECUTABLE}")
+set(CMAKE_DISABLE_FIND_PACKAGE_Python3 TRUE CACHE BOOL "" FORCE)
+set(Python3_Interpreter_FOUND FALSE)
+set(Python3_EXECUTABLE "")
+set(MBEDTLS_PYTHON_EXECUTABLE FALSE)
 add_subdirectory(
     "${MKWVC_MBEDTLS_DIR}"
     "${CMAKE_BINARY_DIR}/mkwvc-mbedtls"
     EXCLUDE_FROM_ALL)
+set(CMAKE_DISABLE_FIND_PACKAGE_Python3 FALSE CACHE BOOL "" FORCE)
+set(Python3_Interpreter_FOUND "${_MKWVC_SAVED_PYTHON3_FOUND}")
+set(Python3_EXECUTABLE "${_MKWVC_SAVED_PYTHON3_EXECUTABLE}")
 if(TARGET mbedtls AND NOT TARGET MbedTLS::MbedTLS)
     add_library(MbedTLS::MbedTLS ALIAS mbedtls)
 endif()
@@ -111,6 +125,10 @@ set(PLOG_INSTALL OFF CACHE BOOL "" FORCE)
 set(sctp_build_shared_lib OFF CACHE BOOL "" FORCE)
 set(sctp_build_programs OFF CACHE BOOL "" FORCE)
 set(sctp_werror OFF CACHE BOOL "" FORCE)
+# CMake 4 removed compatibility with projects declaring a minimum below 3.5.
+# The installer normalizes usrsctp to 3.5 as well, and this policy floor keeps
+# nested dependency configuration deterministic if upstream metadata differs.
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
 add_subdirectory(
     "${MKWVC_DATACHANNEL_DIR}"
     "${CMAKE_BINARY_DIR}/mkwvc-datachannel"
