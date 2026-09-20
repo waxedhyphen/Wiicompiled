@@ -41,12 +41,14 @@ IdentitySnapshot g_identity;
 std::uint32_t g_identitySocket = UINT32_MAX;
 
 constexpr std::size_t kMaxRoomReplyBytes = 64 * 1024;
+constexpr unsigned kRoomLeaveConfirmations = 3;
 
 struct RoomLookupState {
     std::mutex mutex;
     RoomSnapshot snapshot;
     std::uint64_t observedIdentityGeneration = UINT64_MAX;
     std::uint64_t lookupToken = 0;
+    unsigned consecutiveRoomMisses = 0;
     std::chrono::steady_clock::time_point nextAutomaticLookup{};
 };
 
@@ -256,6 +258,7 @@ RoomSnapshot ParseRoomReply(const std::string& message, std::string_view expecte
         return result;
     }
 
+    result.lookupSucceeded = true;
     result.profileId = lines[0];
     result.roomId = lines[1];
     result.roomInstanceId = lines[2];
@@ -465,11 +468,19 @@ bool StartRoomLookup(const IdentitySnapshot& identity) noexcept {
             return false;
         }
         token = ++state.lookupToken;
-        state.snapshot = {};
+
+        // A background verification must not behave like pressing the manual
+        // refresh button. Keep the last confirmed room visible/active while the
+        // new lookup is in flight; only the very first lookup gets a loading
+        // status.
+        const bool hadRoom = state.snapshot.roomFound;
+        const bool hadResult = state.snapshot.lookupComplete;
         state.snapshot.lookupInFlight = true;
-        state.snapshot.status = "Looking up current Retro Rewind room...";
-        state.snapshot.profileId = identity.profileId;
         state.snapshot.identityGeneration = identity.generation;
+        state.snapshot.profileId = identity.profileId;
+        if (!hadRoom && !hadResult) {
+            state.snapshot.status = "Looking up current Retro Rewind room...";
+        }
     }
 
     try {
@@ -483,8 +494,48 @@ bool StartRoomLookup(const IdentitySnapshot& identity) noexcept {
             if (state.lookupToken != token) {
                 return;
             }
-            state.snapshot = std::move(result);
-            state.nextAutomaticLookup = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+
+            const bool hadConfirmedRoom =
+                state.snapshot.roomFound &&
+                state.snapshot.identityGeneration == generation;
+
+            if (result.lookupSucceeded && result.roomFound) {
+                // Positive room evidence is authoritative for discovery: accept
+                // joins and room switches immediately and reset any miss streak.
+                state.snapshot = std::move(result);
+                state.consecutiveRoomMisses = 0;
+            } else if (result.lookupSucceeded && !result.roomFound && hadConfirmedRoom) {
+                // The public roster can briefly omit a player during transitions
+                // or backend hiccups. Do not tear down a confirmed voice room on
+                // one empty lookup. Require several consecutive valid misses.
+                ++state.consecutiveRoomMisses;
+                if (state.consecutiveRoomMisses >= kRoomLeaveConfirmations) {
+                    state.snapshot = std::move(result);
+                    state.consecutiveRoomMisses = 0;
+                } else {
+                    state.snapshot.lookupInFlight = false;
+                    state.snapshot.lookupComplete = true;
+                    state.snapshot.status =
+                        "Room still active; background verification miss " +
+                        std::to_string(state.consecutiveRoomMisses) + "/" +
+                        std::to_string(kRoomLeaveConfirmations);
+                }
+            } else if (!result.lookupSucceeded && hadConfirmedRoom) {
+                // Network/Worker errors are not evidence that the user left.
+                // Keep the last confirmed room and try again on the next cycle.
+                state.snapshot.lookupInFlight = false;
+                state.snapshot.lookupComplete = true;
+                state.snapshot.status =
+                    "Room still active; background verification temporarily unavailable";
+            } else {
+                state.snapshot = std::move(result);
+                if (state.snapshot.lookupSucceeded) {
+                    state.consecutiveRoomMisses = 0;
+                }
+            }
+
+            state.nextAutomaticLookup =
+                std::chrono::steady_clock::now() + std::chrono::seconds(5);
         }).detach();
         return true;
     } catch (...) {
@@ -492,7 +543,9 @@ bool StartRoomLookup(const IdentitySnapshot& identity) noexcept {
         if (state.lookupToken == token) {
             state.snapshot.lookupInFlight = false;
             state.snapshot.lookupComplete = true;
-            state.snapshot.status = "Failed to start RR room lookup worker";
+            if (!state.snapshot.roomFound) {
+                state.snapshot.status = "Failed to start RR room lookup worker";
+            }
         }
         return false;
     }
@@ -566,6 +619,7 @@ void ServiceRoomLookup() noexcept {
                 state.snapshot = {};
                 state.snapshot.identityGeneration = identity.generation;
                 state.snapshot.status = "Waiting for live Retro Rewind identity";
+                state.consecutiveRoomMisses = 0;
                 state.nextAutomaticLookup = {};
             }
             return;
