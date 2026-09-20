@@ -1,6 +1,7 @@
 #include "retro_rewind_voice_bridge.h"
 
 #include "runtime_product.h"
+#include "memory.h"
 
 #include <algorithm>
 #include <array>
@@ -53,6 +54,8 @@ struct RoomLookupState {
     std::uint64_t workerIdentityGeneration = UINT64_MAX;
     std::string desiredProfileId;
     bool desiredOnline = false;
+    bool desiredRoomActive = false;
+    bool observedRoomActive = false;
     bool workerRunning = false;
     std::chrono::steady_clock::time_point nextReconnectAttempt{};
 };
@@ -200,6 +203,93 @@ bool ShouldObserve(std::uint16_t peerPort) {
     // message shape before it captures anything.
     return RuntimeProduct::IsRetroRewind() &&
            (peerPort == 0 || peerPort == kGpcmPort);
+}
+
+// Mario Kart Wii RKNet::Controller layout. These offsets are from the PAL
+// Controller layout used by Retro Rewind's own GameSource:
+//   sInstance                 0x809C20D8
+//   connectionState           +0x28
+//   matchmaking infos         +0x38, 0x58 bytes each
+//   roomType                  +0xE8
+//   current matchmaking info  +0x291C
+// MatchMakingInfo:
+//   connected consoles        +0x08
+//   full AID bitmap           +0x10
+//   local AID                 +0x21
+constexpr std::uint32_t kRkNetControllerInstance = 0x809C20D8u;
+constexpr std::uint32_t kControllerConnectionState = 0x28u;
+constexpr std::uint32_t kControllerMatchInfo = 0x38u;
+constexpr std::uint32_t kMatchInfoSize = 0x58u;
+constexpr std::uint32_t kControllerRoomType = 0xE8u;
+constexpr std::uint32_t kControllerCurrentMatchInfo = 0x291Cu;
+constexpr std::uint32_t kMatchConnectedConsoles = 0x08u;
+constexpr std::uint32_t kMatchFullAidBitmap = 0x10u;
+constexpr std::uint32_t kMatchLocalAid = 0x21u;
+constexpr std::uint32_t kConnectionStateInMatching = 6u;
+constexpr std::uint32_t kRoomTypeNone = 0u;
+
+bool IsLocalRkNetRoomActive() noexcept {
+    try {
+        if (!RuntimeProduct::IsRetroRewind() ||
+            !Memory::Contains(kRkNetControllerInstance, 4)) {
+            return false;
+        }
+
+        const std::uint32_t controller = Memory::Read32(kRkNetControllerInstance);
+        if (controller == 0 ||
+            !Memory::Contains(controller, kControllerCurrentMatchInfo + 4)) {
+            return false;
+        }
+
+        const std::uint32_t connectionState =
+            Memory::Read32(controller + kControllerConnectionState);
+        const std::uint32_t roomType =
+            Memory::Read32(controller + kControllerRoomType);
+        if (connectionState != kConnectionStateInMatching ||
+            roomType == kRoomTypeNone) {
+            return false;
+        }
+
+        const std::uint32_t current =
+            Memory::Read32(controller + kControllerCurrentMatchInfo);
+        if (current > 1) {
+            return false;
+        }
+
+        const std::uint32_t match =
+            controller + kControllerMatchInfo + current * kMatchInfoSize;
+        if (!Memory::Contains(match, kMatchInfoSize)) {
+            return false;
+        }
+
+        const std::uint32_t connected =
+            Memory::Read32(match + kMatchConnectedConsoles);
+        const std::uint32_t fullAidBitmap =
+            Memory::Read32(match + kMatchFullAidBitmap);
+        const std::uint8_t localAid =
+            Memory::Read8(match + kMatchLocalAid);
+
+        // Mirrors the game's "has found match" condition: our own AID must be
+        // present and at least one other console must actually be connected.
+        return localAid < 12 &&
+               connected > 1 &&
+               (fullAidBitmap & (1u << localAid)) != 0;
+    } catch (...) {
+        return false;
+    }
+}
+
+void ClearLocalRoomSnapshotLocked(RoomLookupState& state,
+                                  std::uint64_t generation,
+                                  std::string_view status) {
+    RoomSnapshot cleared;
+    cleared.lookupComplete = true;
+    cleared.lookupSucceeded = true;
+    cleared.localRoomActive = false;
+    cleared.identityGeneration = generation;
+    cleared.profileId = state.desiredProfileId;
+    cleared.status = std::string(status);
+    state.snapshot = std::move(cleared);
 }
 
 
@@ -399,6 +489,14 @@ void ApplyRoomResultLocked(RoomLookupState& state, RoomSnapshot result,
         return;
     }
 
+    if (!state.desiredRoomActive) {
+        ClearLocalRoomSnapshotLocked(
+            state, generation, "Not currently connected to an RKNet room");
+        return;
+    }
+
+    result.localRoomActive = true;
+
     const bool hadConfirmedRoom =
         state.snapshot.roomFound &&
         state.snapshot.identityGeneration == generation;
@@ -539,7 +637,10 @@ void PersistentRoomWorker(std::string profileId, std::uint64_t generation) {
     // this sender handles the initial registration and periodic verification
     // without touching the game/UI thread.
     std::thread sender([&]() {
+        bool presenceRegistered = false;
+
         const auto sendPresence = [&]() -> bool {
+            std::string command;
             {
                 std::lock_guard<std::mutex> lock(state.mutex);
                 if (!state.desiredOnline ||
@@ -547,15 +648,23 @@ void PersistentRoomWorker(std::string profileId, std::uint64_t generation) {
                     !connectionAlive.load(std::memory_order_acquire)) {
                     return false;
                 }
-                state.snapshot.lookupInFlight = true;
-                state.snapshot.identityGeneration = generation;
-                state.snapshot.profileId = profileId;
-                if (!state.snapshot.lookupComplete && !state.snapshot.roomFound) {
-                    state.snapshot.status = "Verifying Retro Rewind voice presence...";
+
+                if (state.desiredRoomActive) {
+                    state.snapshot.lookupInFlight = true;
+                    state.snapshot.localRoomActive = true;
+                    state.snapshot.identityGeneration = generation;
+                    state.snapshot.profileId = profileId;
+                    if (!state.snapshot.lookupComplete && !state.snapshot.roomFound) {
+                        state.snapshot.status = "Verifying Retro Rewind voice presence...";
+                    }
+                    command = "RR_DEBUG_PRESENCE " + profileId;
+                } else if (presenceRegistered) {
+                    command = "RR_DEBUG_PRESENCE_CLEAR";
+                } else {
+                    return true;
                 }
             }
 
-            const std::string command = "RR_DEBUG_PRESENCE " + profileId;
             const DWORD sendError = SendWebSocketText(socket.value, command);
             if (sendError != ERROR_SUCCESS) {
                 sendFailure.store(sendError, std::memory_order_release);
@@ -568,6 +677,8 @@ void PersistentRoomWorker(std::string profileId, std::uint64_t generation) {
                     0);
                 return false;
             }
+
+            presenceRegistered = command.rfind("RR_DEBUG_PRESENCE ", 0) == 0;
             return true;
         };
 
@@ -579,10 +690,12 @@ void PersistentRoomWorker(std::string profileId, std::uint64_t generation) {
             bool stop = false;
             {
                 std::unique_lock<std::mutex> lock(state.mutex);
+                const bool registeredBeforeWait = presenceRegistered;
                 state.wake.wait_for(lock, kRoomPresenceRefreshInterval, [&]() {
                     return !connectionAlive.load(std::memory_order_acquire) ||
                            !state.desiredOnline ||
-                           state.desiredIdentityGeneration != generation;
+                           state.desiredIdentityGeneration != generation ||
+                           state.desiredRoomActive != registeredBeforeWait;
                 });
 
                 stop =
@@ -600,8 +713,9 @@ void PersistentRoomWorker(std::string profileId, std::uint64_t generation) {
         }
 
         if (connectionAlive.load(std::memory_order_acquire)) {
-            const std::string clear = "RR_DEBUG_PRESENCE_CLEAR";
-            (void)SendWebSocketText(socket.value, clear);
+            if (presenceRegistered) {
+                (void)SendWebSocketText(socket.value, "RR_DEBUG_PRESENCE_CLEAR");
+            }
             (void)WinHttpWebSocketShutdown(
                 socket.value,
                 WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS,
@@ -761,6 +875,10 @@ IdentitySnapshot Snapshot() {
 void ServiceRoomLookup() noexcept {
     try {
         const IdentitySnapshot identity = Snapshot();
+        const bool localRoomActive =
+            identity.online && !identity.profileId.empty() &&
+            IsLocalRkNetRoomActive();
+
         RoomLookupState& state = RoomState();
         const auto now = std::chrono::steady_clock::now();
 
@@ -773,8 +891,35 @@ void ServiceRoomLookup() noexcept {
             state.desiredIdentityGeneration = identity.generation;
             state.desiredProfileId = identity.profileId;
 
-            if (!state.desiredOnline) {
+            const bool localRoomChanged =
+                state.observedRoomActive != localRoomActive;
+            state.desiredRoomActive = localRoomActive;
+            if (localRoomChanged) {
+                state.observedRoomActive = localRoomActive;
                 notifyWorker = state.workerRunning;
+
+                if (!localRoomActive) {
+                    // This is local game evidence, not a public-roster guess.
+                    // Stop the voice room immediately; the sender concurrently
+                    // issues RR_DEBUG_PRESENCE_CLEAR so remote voice clients
+                    // stop treating us as present as well.
+                    ClearLocalRoomSnapshotLocked(
+                        state,
+                        identity.generation,
+                        "Not currently connected to an RKNet room");
+                } else {
+                    state.snapshot = {};
+                    state.snapshot.localRoomActive = true;
+                    state.snapshot.identityGeneration = identity.generation;
+                    state.snapshot.profileId = identity.profileId;
+                    state.snapshot.status = "Local RKNet room active; verifying voice presence...";
+                }
+            }
+
+            if (!state.desiredOnline) {
+                notifyWorker = notifyWorker || state.workerRunning;
+                state.desiredRoomActive = false;
+                state.observedRoomActive = false;
                 state.nextReconnectAttempt = {};
 
                 if (state.observedIdentityGeneration != identity.generation ||
@@ -785,21 +930,28 @@ void ServiceRoomLookup() noexcept {
                     state.snapshot = {};
                     state.snapshot.identityGeneration = identity.generation;
                     state.snapshot.status = "Waiting for live Retro Rewind identity";
-                    }
+                }
             } else {
                 const bool identityChanged =
                     state.observedIdentityGeneration != identity.generation;
 
                 if (identityChanged) {
                     state.observedIdentityGeneration = identity.generation;
-                            state.nextReconnectAttempt = {};
+                    state.nextReconnectAttempt = {};
 
-                    // Never carry a confirmed room from an old GPCM session into
-                    // a new identity generation.
-                    state.snapshot = {};
-                    state.snapshot.identityGeneration = identity.generation;
-                    state.snapshot.profileId = identity.profileId;
-                    state.snapshot.status = "Connecting to voice signaling...";
+                    if (localRoomActive) {
+                        state.snapshot = {};
+                        state.snapshot.localRoomActive = true;
+                        state.snapshot.identityGeneration = identity.generation;
+                        state.snapshot.profileId = identity.profileId;
+                        state.snapshot.status =
+                            "Local RKNet room active; connecting to voice signaling...";
+                    } else {
+                        ClearLocalRoomSnapshotLocked(
+                            state,
+                            identity.generation,
+                            "Online, but not currently connected to an RKNet room");
+                    }
                 }
 
                 if (state.workerRunning) {
@@ -810,10 +962,13 @@ void ServiceRoomLookup() noexcept {
                            now >= state.nextReconnectAttempt) {
                     state.workerRunning = true;
                     state.workerIdentityGeneration = identity.generation;
-                        state.snapshot.lookupInFlight = true;
+                    state.snapshot.lookupInFlight = localRoomActive;
+                    state.snapshot.localRoomActive = localRoomActive;
                     state.snapshot.identityGeneration = identity.generation;
                     state.snapshot.profileId = identity.profileId;
-                    if (!state.snapshot.lookupComplete && !state.snapshot.roomFound) {
+                    if (localRoomActive &&
+                        !state.snapshot.lookupComplete &&
+                        !state.snapshot.roomFound) {
                         state.snapshot.status = "Connecting to voice signaling...";
                     }
                     startWorker = true;
@@ -841,7 +996,6 @@ void ServiceRoomLookup() noexcept {
     } catch (...) {
     }
 }
-
 
 RoomSnapshot Room() {
     RoomLookupState& state = RoomState();
