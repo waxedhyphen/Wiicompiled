@@ -208,7 +208,6 @@ bool ShouldObserve(std::uint16_t peerPort) {
 // Mario Kart Wii RKNet::Controller layout. These offsets are from the PAL
 // Controller layout used by Retro Rewind's own GameSource:
 //   sInstance                 0x809C20D8
-//   connectionState           +0x28
 //   matchmaking infos         +0x38, 0x58 bytes each
 //   roomType                  +0xE8
 //   current matchmaking info  +0x291C
@@ -217,7 +216,6 @@ bool ShouldObserve(std::uint16_t peerPort) {
 //   full AID bitmap           +0x10
 //   local AID                 +0x21
 constexpr std::uint32_t kRkNetControllerInstance = 0x809C20D8u;
-constexpr std::uint32_t kControllerConnectionState = 0x28u;
 constexpr std::uint32_t kControllerMatchInfo = 0x38u;
 constexpr std::uint32_t kMatchInfoSize = 0x58u;
 constexpr std::uint32_t kControllerRoomType = 0xE8u;
@@ -225,7 +223,6 @@ constexpr std::uint32_t kControllerCurrentMatchInfo = 0x291Cu;
 constexpr std::uint32_t kMatchConnectedConsoles = 0x08u;
 constexpr std::uint32_t kMatchFullAidBitmap = 0x10u;
 constexpr std::uint32_t kMatchLocalAid = 0x21u;
-constexpr std::uint32_t kConnectionStateInMatching = 6u;
 constexpr std::uint32_t kRoomTypeNone = 0u;
 
 bool IsLocalRkNetRoomActive() noexcept {
@@ -241,12 +238,9 @@ bool IsLocalRkNetRoomActive() noexcept {
             return false;
         }
 
-        const std::uint32_t connectionState =
-            Memory::Read32(controller + kControllerConnectionState);
         const std::uint32_t roomType =
             Memory::Read32(controller + kControllerRoomType);
-        if (connectionState != kConnectionStateInMatching ||
-            roomType == kRoomTypeNone) {
+        if (roomType == kRoomTypeNone) {
             return false;
         }
 
