@@ -10,6 +10,7 @@
 #include "runtime_log.h"
 #include "runtime_product.h"
 #include "retro_rewind_voice_bridge.h"
+#include "mkwvc/EmbeddedCore.hpp"
 #include "wii_remote_input.h"
 
 #include <imgui.h>
@@ -961,6 +962,14 @@ void DrawVoiceChatSettings() {
         "Captured directly from WiiCompiled's live Retro Rewind GPCM traffic.");
     ImGui::TextDisabled(
         "The session key stays in memory only and is never written to Config.toml or logs.");
+
+    const mkwvc::EmbeddedCoreStatus core = mkwvc::embeddedCoreStatus();
+    ImGui::SeparatorText("Embedded voice core");
+    ImGui::Text("VoiceClient source: %s", core.voiceClientCompiled ? "Compiled" : "Missing");
+    ImGui::Text("Audio / Opus deps: %s", core.audioDependenciesLinked ? "Linked" : "Pending");
+    ImGui::Text("ICE / libdatachannel deps: %s", core.iceDependenciesLinked ? "Linked" : "Pending");
+    ImGui::TextDisabled("%u Hz mono, %u ms frames (%u samples)",
+                        core.sampleRate, core.frameDurationMs, core.frameSamples);
 
     ImGui::SeparatorText("Voice room");
     ImGui::Text("Local RKNet room: %s", room.localRoomActive ? "Active" : "Inactive");
