@@ -54,7 +54,6 @@ struct RoomSnapshot {
 // presence is refreshed periodically over that same socket, and Worker-pushed
 // presence updates are consumed without network I/O on the game/UI thread.
 void ServiceRoomLookup() noexcept;
-void RequestRoomLookup() noexcept;
 RoomSnapshot Room();
 
 } // namespace RetroRewindVoiceBridge
