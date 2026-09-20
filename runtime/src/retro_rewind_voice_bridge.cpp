@@ -102,7 +102,7 @@ void HandleOutboundLocked(std::uint32_t wiiFd, std::string_view message) {
 
 void HandleInboundLocked(std::uint32_t wiiFd, std::string_view message) {
     // Successful GPCM login response ending with the GameSpy final terminator.
-    // Example fields: \\lc\\2\\sesskey\\...\\profileid\\...\\final\\
+    // Example fields include lc=2, sesskey, profileid and the GameSpy final terminator.
     if (message.find("\\lc\\2\\") == std::string_view::npos) {
         return;
     }
