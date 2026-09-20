@@ -49,8 +49,11 @@ public:
                 std::scoped_lock lock(mutex_);
                 if(closed_) return;
                 open_=true;
-                heartbeatEnabled_=false;
+                roomHeartbeatEnabled_=false;
+                rrHeartbeatEnabled_=false;
+                rrSyncEnabled_=false;
                 nextHeartbeat_=std::chrono::steady_clock::now()+std::chrono::seconds(60);
+                nextRrSync_=std::chrono::steady_clock::now()+std::chrono::seconds(30);
                 socket=socket_;
                 pending.swap(pending_);
                 events_.push_back({SignalingEventType::Open,{}});
@@ -203,6 +206,21 @@ public:
         sendCommand("RR_AUTH "+profileId+" "+sessionKey+" "+gameName);
     }
 
+    void admitRetroRewindRoom(std::string roomInstanceId) {
+        roomInstanceId.erase(
+            std::remove_if(roomInstanceId.begin(),roomInstanceId.end(),[](unsigned char ch){return std::isspace(ch)!=0;}),
+            roomInstanceId.end()
+        );
+        std::transform(roomInstanceId.begin(),roomInstanceId.end(),roomInstanceId.begin(),[](unsigned char ch){
+            return static_cast<char>(std::toupper(ch));
+        });
+        if(roomInstanceId.size()!=64 ||
+           !std::all_of(roomInstanceId.begin(),roomInstanceId.end(),[](unsigned char ch){return std::isxdigit(ch)!=0;})) {
+            throw std::invalid_argument("Retro Rewind room instance is invalid");
+        }
+        sendCommand("RR_ADMIT "+roomInstanceId);
+    }
+
     void debugLookupRetroRewind(std::string profileId) {
         profileId.erase(
             std::remove_if(profileId.begin(),profileId.end(),[](unsigned char ch){return std::isspace(ch)!=0;}),
@@ -244,16 +262,31 @@ public:
 
     void service() {
         std::shared_ptr<rtc::WebSocket> socket;
+        bool sendHeartbeat=false;
+        bool sendRrSync=false;
         {
             std::scoped_lock lock(mutex_);
             const auto now=std::chrono::steady_clock::now();
-            if(closed_ || !open_ || !heartbeatEnabled_ || now<nextHeartbeat_) return;
-            nextHeartbeat_=now+std::chrono::seconds(60);
+            if(closed_ || !open_) return;
+
+            if((roomHeartbeatEnabled_ || rrHeartbeatEnabled_) && now>=nextHeartbeat_) {
+                nextHeartbeat_=now+std::chrono::seconds(60);
+                sendHeartbeat=true;
+            }
+            if(rrSyncEnabled_ && now>=nextRrSync_) {
+                nextRrSync_=now+std::chrono::seconds(30);
+                sendRrSync=true;
+            }
+            if(!sendHeartbeat && !sendRrSync) return;
             socket=socket_;
         }
 
-        if(socket && !socket->send("ALIVE")) {
+        if(sendHeartbeat && socket && !socket->send("ALIVE")) {
             pushEvent(SignalingEventType::TransportError,"Signaling heartbeat send failed");
+            return;
+        }
+        if(sendRrSync && socket && !socket->send("RR_SYNC")) {
+            pushEvent(SignalingEventType::TransportError,"Retro Rewind room sync send failed");
         }
     }
 
@@ -289,21 +322,21 @@ private:
         if(message.starts_with("ROOM ")) {
             {
                 std::scoped_lock lock(mutex_);
-                heartbeatEnabled_=true;
+                roomHeartbeatEnabled_=true;
                 nextHeartbeat_=std::chrono::steady_clock::now()+std::chrono::seconds(60);
             }
             pushEvent(SignalingEventType::RoomCreated,message.substr(5));
         } else if(message.starts_with("JOINED ")) {
             {
                 std::scoped_lock lock(mutex_);
-                heartbeatEnabled_=true;
+                roomHeartbeatEnabled_=true;
                 nextHeartbeat_=std::chrono::steady_clock::now()+std::chrono::seconds(60);
             }
             pushEvent(SignalingEventType::RoomJoined,message.substr(7));
         } else if(message=="LEFT") {
             {
                 std::scoped_lock lock(mutex_);
-                heartbeatEnabled_=false;
+                roomHeartbeatEnabled_=false;
             }
             pushEvent(SignalingEventType::RoomLeft,{});
         } else if(message.starts_with("ICE_SERVERS\n")) {
@@ -333,9 +366,37 @@ private:
         } else if(message.starts_with("RR_DEBUG_FAIL ")) {
             pushEvent(SignalingEventType::RetroRewindDebugFailed,message.substr(14));
         } else if(message.starts_with("RR_AUTH_FAIL ")) {
+            {
+                std::scoped_lock lock(mutex_);
+                rrHeartbeatEnabled_=false;
+                rrSyncEnabled_=false;
+            }
             pushEvent(SignalingEventType::RetroRewindAuthFailed,message.substr(13));
         } else if(message=="RR_AUTH_REQUIRED") {
+            {
+                std::scoped_lock lock(mutex_);
+                rrHeartbeatEnabled_=false;
+                rrSyncEnabled_=false;
+            }
             pushEvent(SignalingEventType::RetroRewindAuthRequired,{});
+        } else if(message.starts_with("RR_ADMITTED ")) {
+            {
+                std::scoped_lock lock(mutex_);
+                rrHeartbeatEnabled_=true;
+                rrSyncEnabled_=true;
+                nextHeartbeat_=std::chrono::steady_clock::now()+std::chrono::seconds(60);
+                nextRrSync_=std::chrono::steady_clock::now()+std::chrono::seconds(30);
+            }
+            pushEvent(SignalingEventType::RetroRewindAdmitted,message.substr(12));
+        } else if(message.starts_with("RR_ADMIT_FAIL ")) {
+            {
+                std::scoped_lock lock(mutex_);
+                rrHeartbeatEnabled_=false;
+                rrSyncEnabled_=false;
+            }
+            pushEvent(SignalingEventType::RetroRewindAdmissionFailed,message.substr(14));
+        } else if(message.starts_with("RR_PEER_INFO\n")) {
+            pushEvent(SignalingEventType::RetroRewindPeerInfo,message.substr(13));
         } else if(message.starts_with("ERROR ")) {
             pushEvent(SignalingEventType::Error,message.substr(6));
         }
@@ -347,8 +408,11 @@ private:
     std::vector<SignalingEvent> events_;
     bool open_=false;
     bool closed_=false;
-    bool heartbeatEnabled_=false;
+    bool roomHeartbeatEnabled_=false;
+    bool rrHeartbeatEnabled_=false;
+    bool rrSyncEnabled_=false;
     std::chrono::steady_clock::time_point nextHeartbeat_{};
+    std::chrono::steady_clock::time_point nextRrSync_{};
 };
 
 SignalingClient::SignalingClient(std::string serverUrl):impl_(std::make_unique<Impl>(std::move(serverUrl))) {}
@@ -359,6 +423,7 @@ void SignalingClient::setRoomJoin(std::string roomCode,std::string memberId,std:
 void SignalingClient::sendSignal(std::string signal){impl_->sendSignal(std::move(signal));}
 void SignalingClient::sendSignal(std::string memberId,std::string signal){impl_->sendSignal(std::move(memberId),std::move(signal));}
 void SignalingClient::authenticateRetroRewind(std::string profileId,std::string sessionKey,std::string gameName){impl_->authenticateRetroRewind(std::move(profileId),std::move(sessionKey),std::move(gameName));}
+void SignalingClient::admitRetroRewindRoom(std::string roomInstanceId){impl_->admitRetroRewindRoom(std::move(roomInstanceId));}
 void SignalingClient::debugLookupRetroRewind(std::string profileId){impl_->debugLookupRetroRewind(std::move(profileId));}
 void SignalingClient::setDebugRetroRewindPresence(std::string profileId){impl_->setDebugRetroRewindPresence(std::move(profileId));}
 void SignalingClient::clearDebugRetroRewindPresence(){impl_->clearDebugRetroRewindPresence();}

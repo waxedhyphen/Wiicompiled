@@ -21,6 +21,9 @@ enum class SignalingEventType {
     RetroRewindDebugFailed,
     RetroRewindAuthFailed,
     RetroRewindAuthRequired,
+    RetroRewindAdmitted,
+    RetroRewindAdmissionFailed,
+    RetroRewindPeerInfo,
     Error,
     TransportError,
     Closed
@@ -46,6 +49,7 @@ public:
     void sendSignal(std::string signal);
     void sendSignal(std::string memberId,std::string signal);
     void authenticateRetroRewind(std::string profileId,std::string sessionKey,std::string gameName);
+    void admitRetroRewindRoom(std::string roomInstanceId);
     void debugLookupRetroRewind(std::string profileId);
     void setDebugRetroRewindPresence(std::string profileId);
     void clearDebugRetroRewindPresence();

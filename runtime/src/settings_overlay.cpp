@@ -981,9 +981,14 @@ void DrawVoiceChatSettings() {
         ? "Authorized"
         : (session.authorizationPending ? "Authenticating" : "Blocked");
     ImGui::Text("RR admission: %s", admission);
+    const char* voiceRoomAdmission = session.voiceRoomAdmitted
+        ? "Admitted"
+        : (session.voiceRoomAdmissionPending ? "Waiting" : "Blocked");
+    ImGui::Text("Voice-room admission: %s", voiceRoomAdmission);
+    ImGui::Text("Authorized peers: %u", session.authorizedPeerCount);
     ImGui::Text("VoiceClient: %s",
                 session.voiceClientRunning ? "Running" : "Stopped");
-    ImGui::Text("Peers: %u", session.peerCount);
+    ImGui::Text("Voice peers: %u", session.peerCount);
     ImGui::Text("Session: %s",
                 session.status.empty() ? "-" : session.status.c_str());
 

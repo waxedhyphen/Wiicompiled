@@ -18,6 +18,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -43,6 +44,7 @@ struct EmbeddedVoiceSessionState {
     mkwvc::EmbeddedVoiceSessionStatus status;
     std::string profileId;
     std::string roomInstanceId;
+    std::unordered_map<std::string,std::string> authorizedPeers;
     std::uint64_t identityGeneration = 0;
     std::chrono::steady_clock::time_point nextReconnect{};
 };
@@ -56,6 +58,7 @@ void clearVoiceSessionLocked(EmbeddedVoiceSessionState& state, std::string statu
     state.signaling.reset();
     state.profileId.clear();
     state.roomInstanceId.clear();
+    state.authorizedPeers.clear();
     state.identityGeneration = 0;
     state.nextReconnect = {};
     state.status = {};
@@ -83,6 +86,34 @@ bool matchesAuthorizedRoom(
     return lines.size() >= 3 &&
            lines[0] == profileId &&
            lines[2] == roomInstanceId;
+}
+
+bool parseAdmission(
+    std::string_view payload,
+    std::string& memberId,
+    std::string& roomInstanceId) {
+    const auto lines=splitLines(payload);
+    if(lines.size()<2 || lines[0].size()!=32 || lines[1].size()!=64) return false;
+    memberId=std::string(lines[0]);
+    roomInstanceId=std::string(lines[1]);
+    return true;
+}
+
+bool parseAuthorizedPeer(
+    std::string_view payload,
+    std::string_view expectedRoomInstanceId,
+    std::string& memberId,
+    std::string& participantId) {
+    const auto lines=splitLines(payload);
+    if(lines.size()<5 ||
+       lines[0].size()!=32 ||
+       lines[1].empty() ||
+       lines[2]!=expectedRoomInstanceId) {
+        return false;
+    }
+    memberId=std::string(lines[0]);
+    participantId=std::string(lines[1]);
+    return true;
 }
 
 }
@@ -130,6 +161,7 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
             state.signaling.reset();
             state.profileId = input.profileId;
             state.roomInstanceId = input.roomInstanceId;
+            state.authorizedPeers.clear();
             state.identityGeneration = input.identityGeneration;
             state.nextReconnect = {};
             state.status = {};
@@ -138,6 +170,8 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
         state.status.lifecycleActive = true;
         state.status.roomInstanceId = input.roomInstanceId;
         state.status.voiceClientRunning = false;
+        state.status.authorizedPeerCount =
+            static_cast<std::uint32_t>(state.authorizedPeers.size());
         state.status.peerCount = 0;
 
         const auto now = std::chrono::steady_clock::now();
@@ -189,19 +223,91 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
                         state.status.status = "Failed to submit RR authentication";
                     }
                     break;
-                case SignalingEventType::RetroRewindStatus:
+                case SignalingEventType::RetroRewindStatus: {
                     state.status.authorizationPending = false;
-                    state.status.roomAuthorized = matchesAuthorizedRoom(
+                    const bool authorized=matchesAuthorizedRoom(
                         event.payload,
                         input.profileId,
                         input.roomInstanceId);
-                    state.status.status = state.status.roomAuthorized
-                        ? "RR room authorized; peer orchestration pending"
-                        : "Verified RR room does not match local room instance";
+                    state.status.roomAuthorized=authorized;
+                    if(!authorized) {
+                        state.status.voiceRoomAdmissionPending=false;
+                        state.status.voiceRoomAdmitted=false;
+                        state.status.localMemberId.clear();
+                        state.authorizedPeers.clear();
+                        state.status.authorizedPeerCount=0;
+                        state.status.status="Verified RR room does not match local room instance";
+                        break;
+                    }
+
+                    if(!state.status.voiceRoomAdmitted &&
+                       !state.status.voiceRoomAdmissionPending) {
+                        try {
+                            state.signaling->admitRetroRewindRoom(input.roomInstanceId);
+                            state.status.voiceRoomAdmissionPending=true;
+                            state.status.status="RR authorized; requesting voice-room admission...";
+                        } catch (...) {
+                            state.status.voiceRoomAdmissionPending=false;
+                            state.status.status="Failed to request RR voice-room admission";
+                        }
+                    }
                     break;
+                }
+                case SignalingEventType::RetroRewindAdmitted: {
+                    std::string memberId;
+                    std::string admittedRoom;
+                    if(!parseAdmission(event.payload,memberId,admittedRoom) ||
+                       admittedRoom!=input.roomInstanceId) {
+                        state.status.voiceRoomAdmissionPending=false;
+                        state.status.voiceRoomAdmitted=false;
+                        state.status.localMemberId.clear();
+                        state.authorizedPeers.clear();
+                        state.status.authorizedPeerCount=0;
+                        state.status.status="Malformed or mismatched RR voice-room admission";
+                        break;
+                    }
+                    state.status.voiceRoomAdmissionPending=false;
+                    state.status.voiceRoomAdmitted=true;
+                    state.status.localMemberId=std::move(memberId);
+                    state.status.status="Authorized RR voice room admitted; waiting for peers";
+                    break;
+                }
+                case SignalingEventType::RetroRewindAdmissionFailed:
+                    state.status.voiceRoomAdmissionPending=false;
+                    state.status.voiceRoomAdmitted=false;
+                    state.status.localMemberId.clear();
+                    state.authorizedPeers.clear();
+                    state.status.authorizedPeerCount=0;
+                    state.status.status=event.payload.empty()
+                        ? "RR voice-room admission failed"
+                        : "RR voice-room admission failed: "+event.payload;
+                    break;
+                case SignalingEventType::RetroRewindPeerInfo: {
+                    std::string memberId;
+                    std::string participantId;
+                    if(!state.status.voiceRoomAdmitted ||
+                       !parseAuthorizedPeer(
+                           event.payload,
+                           input.roomInstanceId,
+                           memberId,
+                           participantId) ||
+                       participantId==input.profileId) {
+                        break;
+                    }
+                    state.authorizedPeers[memberId]=participantId;
+                    state.status.authorizedPeerCount=
+                        static_cast<std::uint32_t>(state.authorizedPeers.size());
+                    state.status.status="Authorized RR peer introduced; ICE not started yet";
+                    break;
+                }
                 case SignalingEventType::RetroRewindAuthFailed:
                     state.status.authorizationPending = false;
                     state.status.roomAuthorized = false;
+                    state.status.voiceRoomAdmissionPending=false;
+                    state.status.voiceRoomAdmitted=false;
+                    state.status.localMemberId.clear();
+                    state.authorizedPeers.clear();
+                    state.status.authorizedPeerCount=0;
                     state.status.status = event.payload.empty()
                         ? "RR voice admission failed"
                         : "RR admission failed: " + event.payload;
@@ -209,6 +315,11 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
                 case SignalingEventType::RetroRewindAuthRequired:
                     state.status.authorizationPending = false;
                     state.status.roomAuthorized = false;
+                    state.status.voiceRoomAdmissionPending=false;
+                    state.status.voiceRoomAdmitted=false;
+                    state.status.localMemberId.clear();
+                    state.authorizedPeers.clear();
+                    state.status.authorizedPeerCount=0;
                     state.status.status = "RR voice admission expired";
                     break;
                 case SignalingEventType::TransportError:
@@ -216,13 +327,30 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
                     state.status.signalingConnected = false;
                     state.status.authorizationPending = false;
                     state.status.roomAuthorized = false;
+                    state.status.voiceRoomAdmissionPending=false;
+                    state.status.voiceRoomAdmitted=false;
+                    state.status.localMemberId.clear();
+                    state.authorizedPeers.clear();
+                    state.status.authorizedPeerCount=0;
                     state.status.status = "Embedded signaling disconnected; retrying";
                     reconnect = true;
                     break;
                 case SignalingEventType::Error:
                     state.status.authorizationPending = false;
                     state.status.roomAuthorized = false;
+                    state.status.voiceRoomAdmissionPending=false;
+                    state.status.voiceRoomAdmitted=false;
+                    state.status.localMemberId.clear();
+                    state.authorizedPeers.clear();
+                    state.status.authorizedPeerCount=0;
                     state.status.status = "Embedded signaling returned an error";
+                    break;
+                case SignalingEventType::PeerLeft:
+                    if(!event.payload.empty()) {
+                        state.authorizedPeers.erase(event.payload);
+                        state.status.authorizedPeerCount=
+                            static_cast<std::uint32_t>(state.authorizedPeers.size());
+                    }
                     break;
                 default:
                     break;
