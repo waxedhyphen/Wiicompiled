@@ -8,6 +8,8 @@
 #include "music_attenuation.h"
 #include "runtime_config.h"
 #include "runtime_log.h"
+#include "runtime_product.h"
+#include "retro_rewind_voice_bridge.h"
 #include "wii_remote_input.h"
 
 #include <imgui.h>
@@ -938,6 +940,31 @@ void DrawControllerSettings() {
     DrawRumbleSettings();
 }
 
+void DrawVoiceChatSettings() {
+    const RetroRewindVoiceBridge::IdentitySnapshot identity =
+        RetroRewindVoiceBridge::Snapshot();
+
+    ImGui::TextUnformatted("Retro Rewind voice integration");
+    ImGui::SeparatorText("Live GPCM identity");
+
+    ImGui::Text("Online: %s", identity.online ? "Yes" : "No");
+    ImGui::Text("Profile ID: %s",
+                identity.profileId.empty() ? "-" : identity.profileId.c_str());
+    ImGui::Text("Session key: %s",
+                identity.sessionKey.empty() ? "Not captured" : "Captured (hidden)");
+    ImGui::Text("Game name: %s",
+                identity.gameName.empty() ? "-" : identity.gameName.c_str());
+
+    ImGui::TextDisabled(
+        "Captured directly from WiiCompiled's live Retro Rewind GPCM traffic.");
+    ImGui::TextDisabled(
+        "The session key stays in memory only and is never written to Config.toml or logs.");
+
+    ImGui::SeparatorText("Voice room");
+    ImGui::TextDisabled(
+        "Automatic RR room lookup and VoiceSession binding are the next integration step.");
+}
+
 void DrawAudioSettings() {
     ImGui::SetNextItemWidth(220.0f);
     if (ImGui::SliderInt("Master", &g_audioVolumePercent, 0, 100, "%d%%")) {
@@ -1262,6 +1289,11 @@ void DrawTopBar() {
         // Nest capture under this menu so opening/closing the modal preserves
         // the settings popup and its current port and scroll position.
         DrawRebindPrompt();
+        ImGui::EndMenu();
+    }
+
+    if (RuntimeProduct::IsRetroRewind() && ImGui::BeginMenu("Voice Chat")) {
+        DrawVoiceChatSettings();
         ImGui::EndMenu();
     }
 
