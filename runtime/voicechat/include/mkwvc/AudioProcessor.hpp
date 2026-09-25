@@ -17,6 +17,8 @@ struct AudioProcessingSettings {
     float microphoneBoost=1.0f;
     bool compressor=false;
     int compressorStrength=50;
+
+    bool operator==(const AudioProcessingSettings&) const = default;
 };
 
 class AudioProcessor {
