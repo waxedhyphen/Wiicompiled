@@ -89,6 +89,18 @@ std::uint32_t peakOf(std::span<const std::int16_t> samples) {
     return peak;
 }
 
+float rmsOf(std::span<const std::int16_t> samples) {
+    if(samples.empty()) return 0.0f;
+    double energy=0.0;
+    for(const auto sample:samples) energy+=static_cast<double>(sample)*static_cast<double>(sample);
+    return static_cast<float>(std::sqrt(energy/static_cast<double>(samples.size())));
+}
+
+std::int64_t steadyNowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 void applyGainWithLimiter(std::span<std::int16_t> samples,float gain,float& limiterGain) {
     gain=std::max(0.0f,gain);
     float peak=0.0f;
@@ -125,6 +137,10 @@ struct VoiceClient::PeerState {
     bool haveStream=false;
     std::atomic<bool> running{false};
     std::atomic<float> volume{1.0f};
+    std::atomic<std::uint32_t> voicePeak{0};
+    std::atomic<std::int64_t> speakingUntilMs{0};
+    std::atomic<bool> remoteMuted{false};
+    std::atomic<bool> remoteDeafened{false};
     std::atomic<std::uint64_t> txPackets{0};
     std::atomic<std::uint64_t> rxPackets{0};
     std::atomic<std::uint64_t> rawRxPackets{0};
@@ -214,6 +230,7 @@ void VoiceClient::stop() {
     }
 
     simulationQueueDepth_=0;
+    transmitting_=false;
     audio_.stop();
 }
 
@@ -329,6 +346,17 @@ void VoiceClient::setRemoteVolume(const std::string& memberId,float volume) {
 
 void VoiceClient::setTransmitEnabled(bool enabled) {
     transmitEnabled_.store(enabled,std::memory_order_relaxed);
+    if(!enabled) transmitting_.store(false,std::memory_order_relaxed);
+}
+
+void VoiceClient::setLocalStatus(bool muted,bool deafened) {
+    localMutedStatus_.store(muted,std::memory_order_relaxed);
+    localDeafenedStatus_.store(deafened,std::memory_order_relaxed);
+}
+
+void VoiceClient::setVoiceActivation(bool enabled,float threshold) {
+    voiceActivationEnabled_.store(enabled,std::memory_order_relaxed);
+    voiceActivationThreshold_.store(std::clamp(threshold,0.005f,0.25f),std::memory_order_relaxed);
 }
 
 void VoiceClient::setDeafened(bool deafened) {
@@ -388,15 +416,16 @@ VoiceStats VoiceClient::stats() const {
         static_cast<float>(estimatedJitterMicros_.load(std::memory_order_relaxed))/1000.0f,
         micPeak_.load(std::memory_order_relaxed),
         playbackPeak_.load(std::memory_order_relaxed),
+        transmitting_.load(std::memory_order_relaxed),
         running_.load(std::memory_order_relaxed)
     };
 }
-
 
 std::vector<PeerVoiceStats> VoiceClient::peerStats() const {
     const auto peers=peerSnapshot();
     std::vector<PeerVoiceStats> result;
     result.reserve(peers.size());
+    const auto now=steadyNowMs();
 
     for(const auto& peer:peers) {
         result.push_back({
@@ -424,6 +453,10 @@ std::vector<PeerVoiceStats> VoiceClient::peerStats() const {
             peer->jitterBufferCurrentMs.load(std::memory_order_relaxed),
             static_cast<float>(peer->estimatedJitterMicros.load(std::memory_order_relaxed))/1000.0f,
             peer->volume.load(std::memory_order_relaxed),
+            peer->voicePeak.load(std::memory_order_relaxed),
+            now<peer->speakingUntilMs.load(std::memory_order_relaxed),
+            peer->remoteMuted.load(std::memory_order_relaxed),
+            peer->remoteDeafened.load(std::memory_order_relaxed),
             peer->running.load(std::memory_order_relaxed)
         });
     }
@@ -453,6 +486,8 @@ void VoiceClient::senderLoop() {
     std::size_t filled=0;
     float microphoneLimiterGain=1.0f;
     float monitorLimiterGain=1.0f;
+    bool voiceActivationOpen=false;
+    std::int64_t voiceActivationUntilMs=0;
     OpusCodecSettings appliedSettings{};
     bool settingsApplied=false;
 
@@ -502,6 +537,7 @@ void VoiceClient::senderLoop() {
 
             const bool microphoneTest=microphoneTestEnabled_.load(std::memory_order_relaxed);
             const auto processedPeak=peakOf(samples);
+            const auto processedRms=rmsOf(samples);
             if(microphoneTest) {
                 std::copy(samples.begin(),samples.end(),monitor.begin());
                 const auto monitorVolume=playbackVolume_.load(std::memory_order_relaxed);
@@ -509,7 +545,31 @@ void VoiceClient::senderLoop() {
                 audio_.queueMonitor(monitor);
             }
 
-            if(!transmitEnabled_.load(std::memory_order_relaxed)) std::fill(samples.begin(),samples.end(),0);
+            bool voiceActive=true;
+            if(voiceActivationEnabled_.load(std::memory_order_relaxed)) {
+                const auto now=steadyNowMs();
+                const auto threshold=voiceActivationThreshold_.load(std::memory_order_relaxed)*32768.0f;
+                if(processedRms>=threshold) {
+                    voiceActivationOpen=true;
+                    voiceActivationUntilMs=now+280;
+                } else if(voiceActivationOpen &&
+                          processedRms<threshold*0.65f &&
+                          now>=voiceActivationUntilMs) {
+                    voiceActivationOpen=false;
+                }
+                voiceActive=voiceActivationOpen;
+            } else {
+                voiceActivationOpen=false;
+            }
+
+            const bool transmit=transmitEnabled_.load(std::memory_order_relaxed) && voiceActive;
+            transmitting_.store(transmit && processedPeak>500,std::memory_order_relaxed);
+            if(!transmit) std::fill(samples.begin(),samples.end(),0);
+
+            std::uint8_t flags=0;
+            if(localMutedStatus_.load(std::memory_order_relaxed)) flags|=0x01;
+            if(localDeafenedStatus_.load(std::memory_order_relaxed)) flags|=0x02;
+            packet[5]=static_cast<std::byte>(flags);
 
             const auto settings=codecSettings();
             if(!settingsApplied || settings!=appliedSettings) {
@@ -554,21 +614,28 @@ void VoiceClient::senderLoop() {
             simulationQueueDepth_.store(queued,std::memory_order_relaxed);
             filled=0;
         } catch(...) {
+            transmitting_=false;
             running_=false;
             break;
         }
     }
+    transmitting_=false;
 }
 
 void VoiceClient::receiverLoop(const std::shared_ptr<PeerState>& peer) {
     std::array<std::byte,VoiceFormat::MaxVoicePacketBytes> packet{};
     std::array<std::int16_t,VoiceFormat::FrameSamples> samples{};
 
-    const auto queueDecoded=[&](std::size_t count) {
+    const auto queueDecoded=[&](std::size_t count,bool observeVoice) {
         PcmFrame frame{};
         const auto copyCount=std::min(count,frame.size());
         std::copy_n(samples.begin(),copyCount,frame.begin());
         peer->pcmFrames.push(std::span<const PcmFrame>(&frame,1));
+        if(observeVoice) {
+            const auto peak=peakOf(std::span<const std::int16_t>(frame.data(),copyCount));
+            peer->voicePeak.store(peak,std::memory_order_relaxed);
+            if(peak>600) peer->speakingUntilMs.store(steadyNowMs()+300,std::memory_order_relaxed);
+        }
     };
 
     const auto conceal=[&](bool expansion) {
@@ -581,7 +648,7 @@ void VoiceClient::receiverLoop(const std::shared_ptr<PeerState>& peer) {
                 plcFrames_.fetch_add(1,std::memory_order_relaxed);
                 peer->plcFrames.fetch_add(1,std::memory_order_relaxed);
             }
-            queueDecoded(decoded);
+            queueDecoded(decoded,false);
         } catch(...) {
             decoderErrors_.fetch_add(1,std::memory_order_relaxed);
             peer->decoderErrors.fetch_add(1,std::memory_order_relaxed);
@@ -622,7 +689,7 @@ void VoiceClient::receiverLoop(const std::shared_ptr<PeerState>& peer) {
                         );
                         fecAttempts_.fetch_add(1,std::memory_order_relaxed);
                         peer->fecAttempts.fetch_add(1,std::memory_order_relaxed);
-                        queueDecoded(decoded);
+                        queueDecoded(decoded,true);
                         continue;
                     } catch(...) {
                         decoderErrors_.fetch_add(1,std::memory_order_relaxed);
@@ -640,7 +707,7 @@ void VoiceClient::receiverLoop(const std::shared_ptr<PeerState>& peer) {
                     samples,
                     false
                 );
-                queueDecoded(decoded);
+                queueDecoded(decoded,true);
             } catch(...) {
                 decoderErrors_.fetch_add(1,std::memory_order_relaxed);
                 peer->decoderErrors.fetch_add(1,std::memory_order_relaxed);
@@ -668,6 +735,10 @@ void VoiceClient::receiverLoop(const std::shared_ptr<PeerState>& peer) {
                 processReadyFrames();
                 continue;
             }
+
+            const auto flags=std::to_integer<std::uint8_t>(received[5]);
+            peer->remoteMuted.store((flags&0x01)!=0,std::memory_order_relaxed);
+            peer->remoteDeafened.store((flags&0x02)!=0,std::memory_order_relaxed);
 
             rxPackets_.fetch_add(1,std::memory_order_relaxed);
             rxBytes_.fetch_add(size,std::memory_order_relaxed);
@@ -723,6 +794,8 @@ void VoiceClient::receiverLoop(const std::shared_ptr<PeerState>& peer) {
         processReadyFrames();
     }
 
+    peer->voicePeak=0;
+    peer->speakingUntilMs=0;
     peer->running=false;
 }
 
