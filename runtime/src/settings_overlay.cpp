@@ -1205,7 +1205,7 @@ void DrawVoiceChatSettings() {
     };
 
     ImGui::TextUnformatted("Retro Rewind voice integration");
-    ImGui::TextDisabled("Integration: voice-bridge-v17-ui-mic-fix-stage4c");
+    ImGui::TextDisabled("Integration: voice-bridge-v19-mic-monitor-device-fix-stage4c");
 
     const std::string localName=playerNameFor(identity.profileId);
     const std::string localFriendCode=playerFriendCodeFor(identity.profileId);
@@ -1223,13 +1223,16 @@ void DrawVoiceChatSettings() {
             mkwvc::setEmbeddedVoiceInputDevice({});
             controls=mkwvc::embeddedVoiceControls();
         }
-        for(const auto& device:controls.inputDevices) {
+        for(std::size_t deviceIndex=0;deviceIndex<controls.inputDevices.size();++deviceIndex) {
+            const auto& device=controls.inputDevices[deviceIndex];
             const bool selected=controls.inputDevice==device;
+            ImGui::PushID(static_cast<int>(deviceIndex));
             if(ImGui::Selectable(device.c_str(),selected)) {
                 mkwvc::setEmbeddedVoiceInputDevice(device);
                 controls=mkwvc::embeddedVoiceControls();
             }
             if(selected) ImGui::SetItemDefaultFocus();
+            ImGui::PopID();
         }
         ImGui::EndCombo();
     }
@@ -1248,13 +1251,16 @@ void DrawVoiceChatSettings() {
             mkwvc::setEmbeddedVoiceOutputDevice({});
             controls=mkwvc::embeddedVoiceControls();
         }
-        for(const auto& device:controls.outputDevices) {
+        for(std::size_t deviceIndex=0;deviceIndex<controls.outputDevices.size();++deviceIndex) {
+            const auto& device=controls.outputDevices[deviceIndex];
             const bool selected=controls.outputDevice==device;
+            ImGui::PushID(static_cast<int>(deviceIndex));
             if(ImGui::Selectable(device.c_str(),selected)) {
                 mkwvc::setEmbeddedVoiceOutputDevice(device);
                 controls=mkwvc::embeddedVoiceControls();
             }
             if(selected) ImGui::SetItemDefaultFocus();
+            ImGui::PopID();
         }
         ImGui::EndCombo();
     }
