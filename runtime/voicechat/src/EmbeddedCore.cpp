@@ -148,8 +148,15 @@ void loadSettingsLocked(EmbeddedVoiceSessionState& state) {
     try {
         const auto path=RuntimeConfigFile::ResolveConfigPath();
         std::ifstream input(path,std::ios::binary);
+        bool pushToTalkBindingWasConfigured=false;
         if(input) {
             const auto document=toml::parse(input,RuntimeConfigFile::PathToUtf8(path));
+            if(document.contains("voicechat") && document.at("voicechat").is_table()) {
+                const auto& voiceTable=document.at("voicechat").as_table();
+                pushToTalkBindingWasConfigured=
+                    voiceTable.find("ptt_key")!=voiceTable.end() ||
+                    voiceTable.find("ptt_controller")!=voiceTable.end();
+            }
             if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","enabled")) state.enabled=*value;
             if(const auto value=RuntimeConfigFile::FindConfigValue<std::string>(document,"voicechat","input_device")) state.inputDevice=*value;
             if(const auto value=RuntimeConfigFile::FindConfigValue<std::string>(document,"voicechat","output_device")) state.outputDevice=*value;
@@ -194,6 +201,11 @@ void loadSettingsLocked(EmbeddedVoiceSessionState& state) {
         }
 
         if(state.pushToTalk && state.voiceActivation) state.voiceActivation=false;
+        if(state.pushToTalk && !pushToTalkBindingWasConfigured) {
+            state.pushToTalk=false;
+            state.pushToTalkHeldInput=false;
+            persistBool("push_to_talk",false);
+        }
         if(state.enabled) {
             state.inputDevices=mkwvc::AudioEngine::captureDevices();
             state.outputDevices=mkwvc::AudioEngine::playbackDevices();
@@ -1158,13 +1170,28 @@ void setEmbeddedVoiceDeafened(bool deafened) {
 void setEmbeddedVoicePushToTalk(bool enabled) {
     auto& state=voiceSessionState();
     std::lock_guard<std::mutex> lock(state.mutex);
+    loadSettingsLocked(state);
+    if(enabled &&
+       state.pushToTalkBinding.keyboard<0 &&
+       state.pushToTalkBinding.controller.empty()) {
+        state.pushToTalk=false;
+        state.pushToTalkHeldInput=false;
+        state.controlError="Bind Push-to-talk in Hotkeys before enabling it.";
+        persistBool("push_to_talk",false);
+        applyVoiceControls(state);
+        return;
+    }
+
     state.pushToTalk=enabled;
     if(enabled) {
         state.voiceActivation=false;
         state.microphoneMuted=false;
         persistBool("voice_activation",false);
         persistBool("muted",false);
+    } else {
+        state.pushToTalkHeldInput=false;
     }
+    state.controlError.clear();
     persistBool("push_to_talk",state.pushToTalk);
     applyVoiceControls(state);
 }
@@ -1195,6 +1222,10 @@ void setEmbeddedVoiceVoiceActivation(bool enabled,int threshold) {
 void setEmbeddedVoiceHotkeyState(bool pushToTalkHeldValue,bool pushToMuteHeldValue) {
     auto& state=voiceSessionState();
     std::lock_guard<std::mutex> lock(state.mutex);
+    if(state.pushToTalkHeldInput==pushToTalkHeldValue &&
+       state.pushToMuteHeldInput==pushToMuteHeldValue) {
+        return;
+    }
     state.pushToTalkHeldInput=pushToTalkHeldValue;
     state.pushToMuteHeldInput=pushToMuteHeldValue;
     applyVoiceControls(state);
@@ -1235,6 +1266,16 @@ void setEmbeddedVoiceBinding(EmbeddedVoiceBindingAction action,std::int32_t keyb
     binding->controller=std::move(controller);
     persistInt(keyName,binding->keyboard);
     persistString(controllerName,binding->controller);
+
+    if(action==EmbeddedVoiceBindingAction::PushToTalk &&
+       binding->keyboard<0 &&
+       binding->controller.empty() &&
+       state.pushToTalk) {
+        state.pushToTalk=false;
+        state.pushToTalkHeldInput=false;
+        persistBool("push_to_talk",false);
+        applyVoiceControls(state);
+    }
 }
 
 void setEmbeddedVoiceMicrophoneTest(bool enabled) {
