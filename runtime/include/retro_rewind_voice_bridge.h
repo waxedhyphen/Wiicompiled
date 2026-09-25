@@ -32,6 +32,7 @@ IdentitySnapshot Snapshot();
 struct RoomPlayer {
     std::string profileId;
     std::string name;
+    std::string friendCode;
     bool voiceChat = false;
 };
 
