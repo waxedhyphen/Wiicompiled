@@ -970,7 +970,7 @@ void DrawVoiceChatSettings() {
     };
 
     ImGui::TextUnformatted("Retro Rewind voice integration");
-    ImGui::TextDisabled("Integration: voice-bridge-v13-single-socket-audio-persist-stage4c");
+    ImGui::TextDisabled("Integration: voice-bridge-v14-toml-include-fix-stage4c");
     ImGui::SeparatorText("Voice controls");
 
     const std::string localName=playerNameFor(identity.profileId);
