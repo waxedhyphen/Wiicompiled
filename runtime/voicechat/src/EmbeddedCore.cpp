@@ -5,6 +5,7 @@
 #include "mkwvc/SignalingClient.hpp"
 #include "mkwvc/VoiceClient.hpp"
 #include "mkwvc/VoiceFormat.hpp"
+#include "runtime_config.h"
 
 #include <miniaudio.h>
 #if __has_include(<opus/opus.h>)
@@ -18,8 +19,11 @@
 #include <speex/speex_preprocess.h>
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
+#include <fstream>
 #include <iterator>
+#include <sstream>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -52,6 +56,12 @@ constexpr std::string_view kSignalingUrl =
     "wss://mkw-voicechat-signaling.mkwvoicechat.workers.dev/";
 constexpr auto kReconnectDelay = std::chrono::seconds(5);
 
+struct EmbeddedPeerMetadata {
+    std::string participantId;
+    std::string displayName;
+    std::string friendCode;
+};
+
 struct EmbeddedPeerLink {
     std::string memberId;
     std::unique_ptr<mkwvc::IcePeerTransport> setup;
@@ -83,8 +93,10 @@ struct EmbeddedVoiceSessionState {
     std::string profileId;
     std::string roomInstanceId;
     std::vector<std::string> iceServers{"stun:stun.l.google.com:19302"};
-    std::unordered_map<std::string,std::string> developmentPeers;
+    std::unordered_map<std::string,EmbeddedPeerMetadata> developmentPeers;
+    std::unordered_map<std::string,float> savedPeerVolumes;
     std::unordered_map<std::string,std::unique_ptr<EmbeddedPeerLink>> peerLinks;
+    bool settingsLoaded=false;
     std::uint64_t identityGeneration = 0;
     std::chrono::steady_clock::time_point nextReconnect{};
 };
@@ -92,6 +104,99 @@ struct EmbeddedVoiceSessionState {
 EmbeddedVoiceSessionState& voiceSessionState() {
     static auto* state = new EmbeddedVoiceSessionState();
     return *state;
+}
+
+std::string formatFloat(float value) {
+    std::ostringstream out;
+    out<<value;
+    return out.str();
+}
+
+void persistString(std::string_view key,const std::string& value) {
+    RuntimeConfigFile::WriteSetting("voicechat",key,RuntimeConfigFile::FormatString(value));
+}
+
+void persistFloat(std::string_view key,float value) {
+    RuntimeConfigFile::WriteSetting("voicechat",key,formatFloat(value));
+}
+
+void persistBool(std::string_view key,bool value) {
+    RuntimeConfigFile::WriteSetting("voicechat",key,value ? "true" : "false");
+}
+
+void persistInt(std::string_view key,int value) {
+    RuntimeConfigFile::WriteSetting("voicechat",key,std::to_string(value));
+}
+
+void loadSettingsLocked(EmbeddedVoiceSessionState& state) {
+    if(state.settingsLoaded) return;
+    state.settingsLoaded=true;
+    state.inputDevices=mkwvc::AudioEngine::captureDevices();
+    state.outputDevices=mkwvc::AudioEngine::playbackDevices();
+
+    try {
+        const auto path=RuntimeConfigFile::ResolveConfigPath();
+        std::ifstream input(path,std::ios::binary);
+        if(!input) return;
+        const auto document=toml::parse(input,RuntimeConfigFile::PathToUtf8(path));
+
+        if(const auto value=RuntimeConfigFile::FindConfigValue<std::string>(document,"voicechat","input_device")) {
+            if(std::find(state.inputDevices.begin(),state.inputDevices.end(),*value)!=state.inputDevices.end()) state.inputDevice=*value;
+        }
+        if(const auto value=RuntimeConfigFile::FindConfigValue<std::string>(document,"voicechat","output_device")) {
+            if(std::find(state.outputDevices.begin(),state.outputDevices.end(),*value)!=state.outputDevices.end()) state.outputDevice=*value;
+        }
+        if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","normalization")) state.audioProcessing.normalization=*value;
+        if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","noise_suppression")) state.audioProcessing.noiseSuppression=*value;
+        if(const auto value=RuntimeConfigFile::FindConfigInt(document,"voicechat","noise_strength")) state.audioProcessing.noiseSuppressionStrength=std::clamp(*value,0,100);
+        if(const auto value=RuntimeConfigFile::FindConfigFloat(document,"voicechat","microphone_gain")) state.microphoneGain=std::clamp(*value,0.25f,5.0f);
+        if(const auto value=RuntimeConfigFile::FindConfigFloat(document,"voicechat","playback_volume")) state.playbackVolume=std::clamp(*value,0.0f,3.0f);
+        if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","muted")) state.microphoneMuted=*value;
+        if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","deafened")) state.deafened=*value;
+        if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","push_to_talk")) state.pushToTalk=*value;
+
+        if(document.contains("voicechat") && document.at("voicechat").is_table()) {
+            for(const auto& [key,value]:document.at("voicechat").as_table()) {
+                (void)value;
+                constexpr std::string_view prefix="peer_volume_";
+                if(!key.starts_with(prefix)) continue;
+                const std::string participantId=key.substr(prefix.size());
+                if(participantId.empty()) continue;
+                if(const auto volume=RuntimeConfigFile::FindConfigFloat(document,"voicechat",key)) {
+                    state.savedPeerVolumes[participantId]=std::clamp(*volume,0.0f,3.0f);
+                }
+            }
+        }
+    } catch(...) {
+    }
+}
+
+std::string decodeHex(std::string_view value) {
+    if(value.size()%2!=0) return {};
+    std::string result;
+    result.reserve(value.size()/2);
+    const auto nibble=[](char ch)->int {
+        if(ch>='0' && ch<='9') return ch-'0';
+        if(ch>='A' && ch<='F') return ch-'A'+10;
+        if(ch>='a' && ch<='f') return ch-'a'+10;
+        return -1;
+    };
+    for(std::size_t i=0;i<value.size();i+=2) {
+        const int hi=nibble(value[i]);
+        const int lo=nibble(value[i+1]);
+        if(hi<0 || lo<0) return {};
+        result.push_back(static_cast<char>((hi<<4)|lo));
+    }
+    return result;
+}
+
+mkwvc::EmbeddedVoiceRoomPlayer* roomPlayer(
+    EmbeddedVoiceSessionState& state,
+    const std::string& participantId) {
+    for(auto& player:state.status.roomPlayers) {
+        if(player.profileId==participantId) return &player;
+    }
+    return nullptr;
 }
 
 bool pushToTalkPressed() noexcept {
@@ -189,20 +294,55 @@ bool matchesAuthorizedRoom(
 
 bool parseAdmission(
     std::string_view payload,
+    std::string_view expectedProfileId,
     std::string& memberId,
-    std::string& roomInstanceId) {
+    std::string& roomInstanceId,
+    std::string& roomId,
+    std::string& created,
+    std::vector<mkwvc::EmbeddedVoiceRoomPlayer>& players) {
     const auto lines=splitLines(payload);
-    if(lines.size()<2 || lines[0].size()!=32 || lines[1].size()!=64) return false;
+    if(lines.size()<5 || lines[0].size()!=32 || lines[1].size()!=64) return false;
+
+    std::size_t count=0;
+    const auto parsed=std::from_chars(lines[4].data(),lines[4].data()+lines[4].size(),count);
+    if(parsed.ec!=std::errc{} || parsed.ptr!=lines[4].data()+lines[4].size() || count>12 || lines.size()<5+count) return false;
+
     memberId=std::string(lines[0]);
     roomInstanceId=std::string(lines[1]);
-    return true;
+    roomId=std::string(lines[2]);
+    created=std::string(lines[3]);
+    players.clear();
+    players.reserve(count);
+
+    bool localFound=false;
+    for(std::size_t i=0;i<count;++i) {
+        const std::string_view line=lines[5+i];
+        const auto first=line.find('\t');
+        const auto second=first==std::string_view::npos ? std::string_view::npos : line.find('\t',first+1);
+        const auto third=second==std::string_view::npos ? std::string_view::npos : line.find('\t',second+1);
+        if(first==std::string_view::npos || second==std::string_view::npos) return false;
+
+        mkwvc::EmbeddedVoiceRoomPlayer player;
+        player.profileId=std::string(line.substr(0,first));
+        player.voiceChat=line.substr(first+1,second-first-1)=="1";
+        player.displayName=decodeHex(third==std::string_view::npos
+            ? line.substr(second+1)
+            : line.substr(second+1,third-second-1));
+        if(player.displayName.empty()) player.displayName="Player";
+        if(third!=std::string_view::npos) player.friendCode=std::string(line.substr(third+1));
+        if(player.profileId==expectedProfileId) localFound=true;
+        if(player.profileId.empty()) return false;
+        players.push_back(std::move(player));
+    }
+
+    return localFound && !roomId.empty() && !created.empty();
 }
 
 bool parseDevelopmentPeer(
     std::string_view payload,
     std::string_view expectedRoomInstanceId,
     std::string& memberId,
-    std::string& participantId) {
+    EmbeddedPeerMetadata& metadata) {
     const auto lines=splitLines(payload);
     if(lines.size()<5 ||
        lines[0].size()!=32 ||
@@ -210,8 +350,12 @@ bool parseDevelopmentPeer(
        lines[2]!=expectedRoomInstanceId) {
         return false;
     }
+
     memberId=std::string(lines[0]);
-    participantId=std::string(lines[1]);
+    metadata.participantId=std::string(lines[1]);
+    metadata.displayName=decodeHex(lines[4]);
+    if(metadata.displayName.empty()) metadata.displayName="Player";
+    if(lines.size()>=6) metadata.friendCode=std::string(lines[5]);
     return true;
 }
 
@@ -226,6 +370,7 @@ void clearPeerRuntime(EmbeddedVoiceSessionState& state) {
     stopVoiceClient(state);
     state.peerLinks.clear();
     state.developmentPeers.clear();
+    for(auto& player:state.status.roomPlayers) player.voiceChat=false;
     state.status.developmentPeerCount=0;
     state.status.peerCount=0;
     state.status.voiceClientRunning=false;
@@ -253,7 +398,10 @@ void removePeer(
         state.voiceClient->removePeer(memberId);
     }
     state.peerLinks.erase(memberId);
-    state.developmentPeers.erase(memberId);
+    if(const auto found=state.developmentPeers.find(memberId);found!=state.developmentPeers.end()) {
+        if(auto* player=roomPlayer(state,found->second.participantId)) player->voiceChat=false;
+        state.developmentPeers.erase(found);
+    }
     state.status.developmentPeerCount=
         static_cast<std::uint32_t>(state.developmentPeers.size());
 
@@ -404,6 +552,12 @@ void pollPeerLinks(EmbeddedVoiceSessionState& state) {
                     std::move(transport));
             }
 
+            if(const auto metadata=state.developmentPeers.find(memberId);metadata!=state.developmentPeers.end()) {
+                if(const auto saved=state.savedPeerVolumes.find(metadata->second.participantId);saved!=state.savedPeerVolumes.end()) {
+                    state.voiceClient->setRemoteVolume(memberId,saved->second);
+                }
+            }
+
             state.status.status=
                 "UNVERIFIED dev P2P voice connected";
         } catch(const std::exception& error) {
@@ -446,12 +600,11 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
     try {
         auto& state = voiceSessionState();
         std::lock_guard<std::mutex> lock(state.mutex);
+        loadSettingsLocked(state);
 
         const bool active =
             input.localRoomActive &&
-            input.roomFound &&
-            !input.profileId.empty() &&
-            !input.roomInstanceId.empty();
+            !input.profileId.empty();
 
         if (!active) {
             clearVoiceSessionLocked(
@@ -465,14 +618,13 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
 
         const bool roomChanged =
             state.identityGeneration != input.identityGeneration ||
-            state.profileId != input.profileId ||
-            state.roomInstanceId != input.roomInstanceId;
+            state.profileId != input.profileId;
 
         if (roomChanged) {
             clearPeerRuntime(state);
             state.signaling.reset();
             state.profileId = input.profileId;
-            state.roomInstanceId = input.roomInstanceId;
+            state.roomInstanceId.clear();
             state.iceServers={"stun:stun.l.google.com:19302"};
             state.identityGeneration = input.identityGeneration;
             state.nextReconnect = {};
@@ -480,7 +632,6 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
         }
 
         state.status.lifecycleActive = true;
-        state.status.roomInstanceId = input.roomInstanceId;
         state.status.developmentPeerCount =
             static_cast<std::uint32_t>(state.developmentPeers.size());
         state.status.voiceClientRunning=state.voiceClient!=nullptr;
@@ -533,8 +684,7 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
                     state.status.localMemberId.clear();
                     try {
                         state.signaling->admitRetroRewindDevelopment(
-                            input.profileId,
-                            input.roomInstanceId);
+                            input.profileId);
                         state.status.developmentAdmissionPending=true;
                         state.status.status=
                             "Requesting UNVERIFIED public-roster admission...";
@@ -550,22 +700,35 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
                 case SignalingEventType::RetroRewindDevelopmentAdmitted: {
                     std::string memberId;
                     std::string admittedRoom;
+                    std::string roomId;
+                    std::string created;
+                    std::vector<EmbeddedVoiceRoomPlayer> players;
                     if(!parseAdmission(
                            event.payload,
+                           input.profileId,
                            memberId,
-                           admittedRoom) ||
-                       admittedRoom!=input.roomInstanceId) {
+                           admittedRoom,
+                           roomId,
+                           created,
+                           players)) {
                         clearPeerRuntime(state);
                         state.status.developmentAdmissionPending=false;
                         state.status.developmentAdmitted=false;
                         state.status.localMemberId.clear();
                         state.status.status=
-                            "Malformed or mismatched development admission";
+                            "Malformed development room admission";
                         break;
                     }
+
+                    state.roomInstanceId=admittedRoom;
                     state.status.developmentAdmissionPending=false;
                     state.status.developmentAdmitted=true;
+                    state.status.roomFound=true;
                     state.status.localMemberId=std::move(memberId);
+                    state.status.roomInstanceId=admittedRoom;
+                    state.status.roomId=std::move(roomId);
+                    state.status.roomCreated=std::move(created);
+                    state.status.roomPlayers=std::move(players);
                     state.status.status=
                         "UNVERIFIED dev room admitted; waiting for peers";
                     break;
@@ -581,17 +744,24 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
                     break;
                 case SignalingEventType::RetroRewindDevelopmentPeerInfo: {
                     std::string memberId;
-                    std::string participantId;
+                    EmbeddedPeerMetadata metadata;
                     if(!state.status.developmentAdmitted ||
+                       state.roomInstanceId.empty() ||
                        !parseDevelopmentPeer(
                            event.payload,
-                           input.roomInstanceId,
+                           state.roomInstanceId,
                            memberId,
-                           participantId) ||
-                       participantId==input.profileId) {
+                           metadata) ||
+                       metadata.participantId==input.profileId) {
                         break;
                     }
-                    state.developmentPeers[memberId]=participantId;
+
+                    if(auto* player=roomPlayer(state,metadata.participantId)) {
+                        player->voiceChat=true;
+                        if(!metadata.displayName.empty()) player->displayName=metadata.displayName;
+                        if(!metadata.friendCode.empty()) player->friendCode=metadata.friendCode;
+                    }
+                    state.developmentPeers[memberId]=std::move(metadata);
                     state.status.developmentPeerCount=
                         static_cast<std::uint32_t>(
                             state.developmentPeers.size());
@@ -629,10 +799,12 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
                     break;
                 case SignalingEventType::RetroRewindStatus:
                     state.status.productionAuthorizationPending=false;
-                    state.status.productionAuthorized=matchesAuthorizedRoom(
-                        event.payload,
-                        input.profileId,
-                        input.roomInstanceId);
+                    state.status.productionAuthorized=
+                        !state.roomInstanceId.empty() &&
+                        matchesAuthorizedRoom(
+                            event.payload,
+                            input.profileId,
+                            state.roomInstanceId);
                     break;
                 case SignalingEventType::RetroRewindAuthFailed:
                 case SignalingEventType::RetroRewindAuthRequired:
@@ -698,6 +870,7 @@ EmbeddedVoiceSessionStatus embeddedVoiceSessionStatus() {
 EmbeddedVoiceControls embeddedVoiceControls() {
     auto& state=voiceSessionState();
     std::lock_guard<std::mutex> lock(state.mutex);
+    loadSettingsLocked(state);
 
     EmbeddedVoiceControls controls;
     controls.inputDevices=state.inputDevices;
@@ -724,7 +897,9 @@ EmbeddedVoiceControls embeddedVoiceControls() {
             EmbeddedVoicePeerControl control;
             control.memberId=peer.memberId;
             if(const auto found=state.developmentPeers.find(peer.memberId);found!=state.developmentPeers.end()) {
-                control.participantId=found->second;
+                control.participantId=found->second.participantId;
+                control.displayName=found->second.displayName;
+                control.friendCode=found->second.friendCode;
             }
             control.volume=peer.volume;
             controls.peers.push_back(std::move(control));
@@ -741,8 +916,19 @@ void refreshEmbeddedVoiceDevices() {
     auto outputs=AudioEngine::playbackDevices();
     auto& state=voiceSessionState();
     std::lock_guard<std::mutex> lock(state.mutex);
+    loadSettingsLocked(state);
     state.inputDevices=std::move(inputs);
     state.outputDevices=std::move(outputs);
+    if(!state.inputDevice.empty() &&
+       std::find(state.inputDevices.begin(),state.inputDevices.end(),state.inputDevice)==state.inputDevices.end()) {
+        state.inputDevice.clear();
+        persistString("input_device",{});
+    }
+    if(!state.outputDevice.empty() &&
+       std::find(state.outputDevices.begin(),state.outputDevices.end(),state.outputDevice)==state.outputDevices.end()) {
+        state.outputDevice.clear();
+        persistString("output_device",{});
+    }
 }
 
 void setEmbeddedVoiceInputDevice(std::string device) {
@@ -753,6 +939,7 @@ void setEmbeddedVoiceInputDevice(std::string device) {
         if(state.voiceClient) state.voiceClient->setCaptureDevice(device);
         if(state.microphoneTestRuntime) state.microphoneTestRuntime->setCaptureDevice(device);
         state.inputDevice=std::move(device);
+        persistString("input_device",state.inputDevice);
         state.controlError.clear();
     } catch(const std::exception& error) {
         state.controlError=error.what();
@@ -767,6 +954,7 @@ void setEmbeddedVoiceOutputDevice(std::string device) {
         if(state.voiceClient) state.voiceClient->setPlaybackDevice(device);
         if(state.microphoneTestRuntime) state.microphoneTestRuntime->setPlaybackDevice(device);
         state.outputDevice=std::move(device);
+        persistString("output_device",state.outputDevice);
         state.controlError.clear();
     } catch(const std::exception& error) {
         state.controlError=error.what();
@@ -781,6 +969,9 @@ void setEmbeddedVoiceProcessing(bool normalization,bool noiseSuppression,int noi
     state.audioProcessing.noiseSuppressionStrength=std::clamp(noiseSuppressionStrength,0,100);
     if(state.voiceClient) state.voiceClient->setAudioProcessingSettings(state.audioProcessing);
     if(state.microphoneTestRuntime) state.microphoneTestRuntime->setAudioProcessingSettings(state.audioProcessing);
+    persistBool("normalization",state.audioProcessing.normalization);
+    persistBool("noise_suppression",state.audioProcessing.noiseSuppression);
+    persistInt("noise_strength",state.audioProcessing.noiseSuppressionStrength);
     state.controlError.clear();
 }
 
@@ -790,6 +981,7 @@ void setEmbeddedVoiceMicrophoneGain(float gain) {
     state.microphoneGain=std::clamp(gain,0.25f,5.0f);
     if(state.voiceClient) state.voiceClient->setMicrophoneGain(state.microphoneGain);
     if(state.microphoneTestRuntime) state.microphoneTestRuntime->setMicrophoneGain(state.microphoneGain);
+    persistFloat("microphone_gain",state.microphoneGain);
     state.controlError.clear();
 }
 
@@ -799,6 +991,7 @@ void setEmbeddedVoicePlaybackVolume(float volume) {
     state.playbackVolume=std::clamp(volume,0.0f,3.0f);
     if(state.voiceClient) state.voiceClient->setPlaybackVolume(state.playbackVolume);
     if(state.microphoneTestRuntime) state.microphoneTestRuntime->setPlaybackVolume(state.playbackVolume);
+    persistFloat("playback_volume",state.playbackVolume);
     state.controlError.clear();
 }
 
@@ -806,6 +999,7 @@ void setEmbeddedVoiceMicrophoneMuted(bool muted) {
     auto& state=voiceSessionState();
     std::lock_guard<std::mutex> lock(state.mutex);
     state.microphoneMuted=muted;
+    persistBool("muted",state.microphoneMuted);
     applyVoiceControls(state);
 }
 
@@ -813,6 +1007,7 @@ void setEmbeddedVoiceDeafened(bool deafened) {
     auto& state=voiceSessionState();
     std::lock_guard<std::mutex> lock(state.mutex);
     state.deafened=deafened;
+    persistBool("deafened",state.deafened);
     applyVoiceControls(state);
 }
 
@@ -821,6 +1016,8 @@ void setEmbeddedVoicePushToTalk(bool enabled) {
     std::lock_guard<std::mutex> lock(state.mutex);
     state.pushToTalk=enabled;
     if(enabled) state.microphoneMuted=false;
+    persistBool("push_to_talk",state.pushToTalk);
+    if(enabled) persistBool("muted",false);
     applyVoiceControls(state);
 }
 
@@ -835,7 +1032,13 @@ void setEmbeddedVoiceMicrophoneTest(bool enabled) {
 void setEmbeddedVoicePeerVolume(const std::string& memberId,float volume) {
     auto& state=voiceSessionState();
     std::lock_guard<std::mutex> lock(state.mutex);
-    if(state.voiceClient) state.voiceClient->setRemoteVolume(memberId,std::clamp(volume,0.0f,3.0f));
+    loadSettingsLocked(state);
+    const float clamped=std::clamp(volume,0.0f,3.0f);
+    if(state.voiceClient) state.voiceClient->setRemoteVolume(memberId,clamped);
+    if(const auto found=state.developmentPeers.find(memberId);found!=state.developmentPeers.end()) {
+        state.savedPeerVolumes[found->second.participantId]=clamped;
+        persistFloat("peer_volume_"+found->second.participantId,clamped);
+    }
 }
 
 }
