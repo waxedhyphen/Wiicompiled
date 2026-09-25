@@ -12,6 +12,11 @@ struct AudioProcessingSettings {
     bool normalization=true;
     bool noiseSuppression=true;
     int noiseSuppressionStrength=50;
+    bool noiseGate=false;
+    int noiseGateThreshold=25;
+    float microphoneBoost=1.0f;
+    bool compressor=false;
+    int compressorStrength=50;
 };
 
 class AudioProcessor {
