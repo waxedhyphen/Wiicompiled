@@ -947,7 +947,202 @@ void DrawVoiceChatSettings() {
     const RetroRewindVoiceBridge::RoomSnapshot room =
         RetroRewindVoiceBridge::Room();
 
+    static bool devicesInitialized=false;
+    if(!devicesInitialized) {
+        mkwvc::refreshEmbeddedVoiceDevices();
+        devicesInitialized=true;
+    }
+
+    auto controls=mkwvc::embeddedVoiceControls();
+    const mkwvc::EmbeddedVoiceSessionStatus session =
+        mkwvc::embeddedVoiceSessionStatus();
+    const auto playerNameFor=[&](const std::string& profileId) {
+        for(const auto& player:room.players) {
+            if(player.profileId==profileId) return player.name;
+        }
+        return profileId.empty() ? std::string("-") : profileId;
+    };
+
     ImGui::TextUnformatted("Retro Rewind voice integration");
+    ImGui::SeparatorText("Voice controls");
+
+    const std::string localName=playerNameFor(identity.profileId);
+    ImGui::Text("Display name: %s",localName.c_str());
+
+    ImGui::TextUnformatted("Audio input");
+    const std::string inputPreview=controls.inputDevice.empty() ? "System default" : controls.inputDevice;
+    const auto& style=ImGui::GetStyle();
+    const float inputRefreshWidth=ImGui::CalcTextSize("Refresh##VoiceInput").x+style.FramePadding.x*2.0f;
+    ImGui::SetNextItemWidth(std::max(120.0f,ImGui::GetContentRegionAvail().x-inputRefreshWidth-style.ItemSpacing.x));
+    if(ImGui::BeginCombo("##VoiceInput",inputPreview.c_str())) {
+        if(ImGui::Selectable("System default",controls.inputDevice.empty())) {
+            mkwvc::setEmbeddedVoiceInputDevice({});
+            controls=mkwvc::embeddedVoiceControls();
+        }
+        for(const auto& device:controls.inputDevices) {
+            const bool selected=controls.inputDevice==device;
+            if(ImGui::Selectable(device.c_str(),selected)) {
+                mkwvc::setEmbeddedVoiceInputDevice(device);
+                controls=mkwvc::embeddedVoiceControls();
+            }
+            if(selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    if(ImGui::Button("Refresh##VoiceInput")) {
+        mkwvc::refreshEmbeddedVoiceDevices();
+        controls=mkwvc::embeddedVoiceControls();
+    }
+
+    ImGui::TextUnformatted("Voice processing");
+    bool normalization=controls.automaticNormalization;
+    if(ImGui::Checkbox("Automatic normalization",&normalization)) {
+        mkwvc::setEmbeddedVoiceProcessing(normalization,controls.noiseSuppression,controls.noiseSuppressionStrength);
+        controls=mkwvc::embeddedVoiceControls();
+    }
+
+    bool noiseSuppression=controls.noiseSuppression;
+    if(ImGui::Checkbox("Noise suppression",&noiseSuppression)) {
+        mkwvc::setEmbeddedVoiceProcessing(controls.automaticNormalization,noiseSuppression,controls.noiseSuppressionStrength);
+        controls=mkwvc::embeddedVoiceControls();
+    }
+    if(controls.noiseSuppression) {
+        int noiseStrength=controls.noiseSuppressionStrength;
+        ImGui::SetNextItemWidth(-1.0f);
+        if(ImGui::SliderInt("##VoiceNoiseStrength",&noiseStrength,0,100,"Noise strength %d%%")) {
+            mkwvc::setEmbeddedVoiceProcessing(controls.automaticNormalization,controls.noiseSuppression,noiseStrength);
+            controls=mkwvc::embeddedVoiceControls();
+        }
+    }
+
+    ImGui::TextUnformatted("Microphone gain");
+    int microphoneGain=static_cast<int>(controls.microphoneGain*100.0f+0.5f);
+    ImGui::SetNextItemWidth(-1.0f);
+    if(ImGui::SliderInt("##VoiceMicrophoneGain",&microphoneGain,25,500,"%d%%")) {
+        mkwvc::setEmbeddedVoiceMicrophoneGain(static_cast<float>(microphoneGain)/100.0f);
+        controls=mkwvc::embeddedVoiceControls();
+    }
+    ImGui::TextDisabled("Normalization runs before the manual microphone gain.");
+
+    ImGui::TextUnformatted("Audio output");
+    const std::string outputPreview=controls.outputDevice.empty() ? "System default" : controls.outputDevice;
+    const float outputRefreshWidth=ImGui::CalcTextSize("Refresh##VoiceOutput").x+style.FramePadding.x*2.0f;
+    ImGui::SetNextItemWidth(std::max(120.0f,ImGui::GetContentRegionAvail().x-outputRefreshWidth-style.ItemSpacing.x));
+    if(ImGui::BeginCombo("##VoiceOutput",outputPreview.c_str())) {
+        if(ImGui::Selectable("System default",controls.outputDevice.empty())) {
+            mkwvc::setEmbeddedVoiceOutputDevice({});
+            controls=mkwvc::embeddedVoiceControls();
+        }
+        for(const auto& device:controls.outputDevices) {
+            const bool selected=controls.outputDevice==device;
+            if(ImGui::Selectable(device.c_str(),selected)) {
+                mkwvc::setEmbeddedVoiceOutputDevice(device);
+                controls=mkwvc::embeddedVoiceControls();
+            }
+            if(selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    if(ImGui::Button("Refresh##VoiceOutput")) {
+        mkwvc::refreshEmbeddedVoiceDevices();
+        controls=mkwvc::embeddedVoiceControls();
+    }
+
+    ImGui::TextUnformatted("Output volume");
+    int outputVolume=static_cast<int>(controls.playbackVolume*100.0f+0.5f);
+    ImGui::SetNextItemWidth(-1.0f);
+    if(ImGui::SliderInt("##VoiceOutputVolume",&outputVolume,0,300,"%d%%")) {
+        mkwvc::setEmbeddedVoicePlaybackVolume(static_cast<float>(outputVolume)/100.0f);
+        controls=mkwvc::embeddedVoiceControls();
+    }
+
+    ImGui::TextUnformatted("Microphone test");
+    bool microphoneTest=controls.microphoneTest;
+    if(ImGui::Checkbox("Hear my processed microphone",&microphoneTest)) {
+        mkwvc::setEmbeddedVoiceMicrophoneTest(microphoneTest);
+        controls=mkwvc::embeddedVoiceControls();
+    }
+    if(!controls.microphoneTest) {
+        ImGui::TextDisabled("Start the test to hear normalization, noise suppression and gain.");
+    } else {
+        ImGui::ProgressBar(std::clamp(static_cast<float>(controls.micPeak)/32768.0f,0.0f,1.0f),ImVec2(-1.0f,20.0f),"");
+        if(controls.pushToTalk) ImGui::TextDisabled("Hold V to hear your processed microphone.");
+        ImGui::TextDisabled("Test mode deafens remote audio and never transmits your microphone.");
+    }
+
+    ImGui::BeginDisabled(controls.microphoneTest || controls.pushToTalk);
+    if(ImGui::Button(controls.microphoneMuted ? "Unmute" : "Mute")) {
+        mkwvc::setEmbeddedVoiceMicrophoneMuted(!controls.microphoneMuted);
+        controls=mkwvc::embeddedVoiceControls();
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(controls.microphoneTest);
+    if(ImGui::Button(controls.deafened ? "Undeafen" : "Deafen")) {
+        mkwvc::setEmbeddedVoiceDeafened(!controls.deafened);
+        controls=mkwvc::embeddedVoiceControls();
+    }
+    ImGui::SameLine();
+    bool pushToTalk=controls.pushToTalk;
+    if(ImGui::Checkbox("Push-to-talk",&pushToTalk)) {
+        mkwvc::setEmbeddedVoicePushToTalk(pushToTalk);
+        controls=mkwvc::embeddedVoiceControls();
+    }
+    ImGui::EndDisabled();
+
+    if(controls.pushToTalk && !controls.microphoneTest) {
+        ImGui::TextDisabled(controls.pushToTalkHeld ? "Push-to-talk active." : "Hold V to talk.");
+    } else if(controls.microphoneTest) {
+        ImGui::TextDisabled("Microphone test active.");
+    } else if(controls.deafened) {
+        ImGui::TextDisabled("Deafened: incoming audio and microphone are muted.");
+    } else if(controls.microphoneMuted) {
+        ImGui::TextDisabled("Muted: microphone is muted.");
+    }
+
+    if(!controls.error.empty()) ImGui::TextWrapped("Voice error: %s",controls.error.c_str());
+
+    ImGui::TextUnformatted("Voice activity");
+    ImGui::TextUnformatted("Sending");
+    ImGui::ProgressBar(std::clamp(static_cast<float>(controls.micPeak)/32768.0f,0.0f,1.0f),ImVec2(-1.0f,20.0f),"");
+
+    ImGui::TextUnformatted("Peers");
+    if(controls.peers.empty()) {
+        ImGui::TextDisabled(session.voiceClientRunning ? "No peer connected." : "Not connected.");
+    } else if(ImGui::BeginTable("EmbeddedVoicePeerList",3,ImGuiTableFlags_SizingStretchProp|ImGuiTableFlags_RowBg)) {
+        ImGui::TableSetupColumn("Player",ImGuiTableColumnFlags_WidthStretch,1.2f);
+        ImGui::TableSetupColumn("Volume",ImGuiTableColumnFlags_WidthStretch,2.0f);
+        ImGui::TableSetupColumn("##VoiceMute",ImGuiTableColumnFlags_WidthFixed,72.0f);
+        for(const auto& peer:controls.peers) {
+            ImGui::PushID(peer.memberId.c_str());
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            const std::string peerName=playerNameFor(peer.participantId);
+            ImGui::TextUnformatted(peerName.c_str());
+            if(!peer.participantId.empty()) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(PID %s)",peer.participantId.c_str());
+            }
+            ImGui::TableNextColumn();
+            int peerVolume=static_cast<int>(peer.volume*100.0f+0.5f);
+            ImGui::SetNextItemWidth(-1.0f);
+            if(ImGui::SliderInt("##VoicePeerVolume",&peerVolume,0,300,"%d%%")) {
+                mkwvc::setEmbeddedVoicePeerVolume(peer.memberId,static_cast<float>(peerVolume)/100.0f);
+            }
+            ImGui::TableNextColumn();
+            ImGui::BeginDisabled(peer.volume<=0.0f);
+            if(ImGui::Button("Mute",ImVec2(-1.0f,0.0f))) {
+                mkwvc::setEmbeddedVoicePeerVolume(peer.memberId,0.0f);
+            }
+            ImGui::EndDisabled();
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+        ImGui::TextDisabled("Peer volume is session-only for now and is not saved.");
+    }
+
     ImGui::SeparatorText("Live GPCM identity");
 
     ImGui::Text("Online: %s", identity.online ? "Yes" : "No");
@@ -971,8 +1166,6 @@ void DrawVoiceChatSettings() {
     ImGui::TextDisabled("%u Hz mono, %u ms frames (%u samples)",
                         core.sampleRate, core.frameDurationMs, core.frameSamples);
 
-    const mkwvc::EmbeddedVoiceSessionStatus session =
-        mkwvc::embeddedVoiceSessionStatus();
     ImGui::SeparatorText("In-process voice session");
     ImGui::Text("Lifecycle: %s", session.lifecycleActive ? "Active" : "Inactive");
     ImGui::Text("Core signaling: %s",

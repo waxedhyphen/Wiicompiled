@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace mkwvc {
 
@@ -39,8 +40,47 @@ struct EmbeddedVoiceSessionStatus {
     std::string status;
 };
 
+struct EmbeddedVoicePeerControl {
+    std::string memberId;
+    std::string participantId;
+    float volume = 1.0f;
+};
+
+struct EmbeddedVoiceControls {
+    std::vector<std::string> inputDevices;
+    std::vector<std::string> outputDevices;
+    std::string inputDevice;
+    std::string outputDevice;
+    bool automaticNormalization = true;
+    bool noiseSuppression = true;
+    int noiseSuppressionStrength = 50;
+    float microphoneGain = 1.0f;
+    float playbackVolume = 1.0f;
+    bool microphoneMuted = false;
+    bool deafened = false;
+    bool pushToTalk = false;
+    bool microphoneTest = false;
+    bool pushToTalkHeld = false;
+    std::uint32_t micPeak = 0;
+    std::uint32_t playbackPeak = 0;
+    std::vector<EmbeddedVoicePeerControl> peers;
+    std::string error;
+};
+
 EmbeddedCoreStatus embeddedCoreStatus() noexcept;
 void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcept;
 EmbeddedVoiceSessionStatus embeddedVoiceSessionStatus();
+EmbeddedVoiceControls embeddedVoiceControls();
+void refreshEmbeddedVoiceDevices();
+void setEmbeddedVoiceInputDevice(std::string device);
+void setEmbeddedVoiceOutputDevice(std::string device);
+void setEmbeddedVoiceProcessing(bool normalization,bool noiseSuppression,int noiseSuppressionStrength);
+void setEmbeddedVoiceMicrophoneGain(float gain);
+void setEmbeddedVoicePlaybackVolume(float volume);
+void setEmbeddedVoiceMicrophoneMuted(bool muted);
+void setEmbeddedVoiceDeafened(bool deafened);
+void setEmbeddedVoicePushToTalk(bool enabled);
+void setEmbeddedVoiceMicrophoneTest(bool enabled);
+void setEmbeddedVoicePeerVolume(const std::string& memberId,float volume);
 
 }

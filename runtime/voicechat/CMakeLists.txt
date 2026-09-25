@@ -143,6 +143,7 @@ add_library(mkw_voicechat_core_stage3 STATIC
     src/EmbeddedCore.cpp
     src/IcePeerTransport.cpp
     src/IceSignal.cpp
+    src/MicrophoneTest.cpp
     src/NetworkSimulator.cpp
     src/OpusCodec.cpp
     src/SignalingClient.cpp

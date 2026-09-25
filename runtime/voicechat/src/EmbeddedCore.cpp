@@ -1,6 +1,7 @@
 #include "mkwvc/EmbeddedCore.hpp"
 #include "mkwvc/IcePeerTransport.hpp"
 #include "mkwvc/IceSignal.hpp"
+#include "mkwvc/MicrophoneTest.hpp"
 #include "mkwvc/SignalingClient.hpp"
 #include "mkwvc/VoiceClient.hpp"
 #include "mkwvc/VoiceFormat.hpp"
@@ -16,6 +17,7 @@
 #include <rtc/rtc.hpp>
 #include <speex/speex_preprocess.h>
 
+#include <algorithm>
 #include <chrono>
 #include <iterator>
 #include <memory>
@@ -27,6 +29,12 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#if defined(_WIN32)
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <Windows.h>
+#endif
 
 namespace {
 
@@ -58,7 +66,20 @@ struct EmbeddedVoiceSessionState {
     std::mutex mutex;
     std::unique_ptr<mkwvc::SignalingClient> signaling;
     std::unique_ptr<mkwvc::VoiceClient> voiceClient;
+    std::unique_ptr<mkwvc::MicrophoneTest> microphoneTestRuntime;
     mkwvc::EmbeddedVoiceSessionStatus status;
+    std::vector<std::string> inputDevices;
+    std::vector<std::string> outputDevices;
+    std::string inputDevice;
+    std::string outputDevice;
+    mkwvc::AudioProcessingSettings audioProcessing{};
+    float microphoneGain=1.0f;
+    float playbackVolume=1.0f;
+    bool microphoneMuted=false;
+    bool deafened=false;
+    bool pushToTalk=false;
+    bool microphoneTest=false;
+    std::string controlError;
     std::string profileId;
     std::string roomInstanceId;
     std::vector<std::string> iceServers{"stun:stun.l.google.com:19302"};
@@ -71,6 +92,63 @@ struct EmbeddedVoiceSessionState {
 EmbeddedVoiceSessionState& voiceSessionState() {
     static auto* state = new EmbeddedVoiceSessionState();
     return *state;
+}
+
+bool pushToTalkPressed() noexcept {
+#if defined(_WIN32)
+    return (GetAsyncKeyState('V')&0x8000)!=0;
+#else
+    return false;
+#endif
+}
+
+bool pushToTalkHeld(const EmbeddedVoiceSessionState& state) noexcept {
+    return !state.pushToTalk || pushToTalkPressed();
+}
+
+void stopMicrophoneTestRuntime(EmbeddedVoiceSessionState& state) {
+    if(!state.microphoneTestRuntime) return;
+    state.microphoneTestRuntime->stop();
+    state.microphoneTestRuntime.reset();
+}
+
+void startMicrophoneTestRuntime(EmbeddedVoiceSessionState& state) {
+    if(state.microphoneTestRuntime || state.voiceClient || !state.microphoneTest) return;
+    auto test=std::make_unique<mkwvc::MicrophoneTest>(state.inputDevice,state.outputDevice);
+    test->setAudioProcessingSettings(state.audioProcessing);
+    test->setMicrophoneGain(state.microphoneGain);
+    test->setPlaybackVolume(state.playbackVolume);
+    test->setMonitorEnabled(pushToTalkHeld(state));
+    test->start();
+    state.microphoneTestRuntime=std::move(test);
+}
+
+void applyVoiceControls(EmbeddedVoiceSessionState& state) {
+    const bool held=pushToTalkHeld(state);
+    if(state.voiceClient) {
+        stopMicrophoneTestRuntime(state);
+        state.voiceClient->setMicrophoneGain(state.microphoneGain);
+        state.voiceClient->setAudioProcessingSettings(state.audioProcessing);
+        state.voiceClient->setPlaybackVolume(state.playbackVolume);
+        state.voiceClient->setTransmitEnabled(!state.microphoneTest && !state.microphoneMuted && !state.deafened && held);
+        state.voiceClient->setDeafened(state.deafened || state.microphoneTest);
+        state.voiceClient->setMicrophoneTestEnabled(state.microphoneTest && held);
+        return;
+    }
+
+    if(!state.microphoneTest) {
+        stopMicrophoneTestRuntime(state);
+        return;
+    }
+
+    try {
+        startMicrophoneTestRuntime(state);
+        if(state.microphoneTestRuntime) state.microphoneTestRuntime->setMonitorEnabled(held);
+    } catch(const std::exception& error) {
+        stopMicrophoneTestRuntime(state);
+        state.microphoneTest=false;
+        state.controlError=error.what();
+    }
 }
 
 std::vector<std::string_view> splitLines(std::string_view value) {
@@ -305,9 +383,19 @@ void pollPeerLinks(EmbeddedVoiceSessionState& state) {
                 std::unique_ptr<mkwvc::VoiceTransport>(link.setup.release());
 
             if(!state.voiceClient) {
+                stopMicrophoneTestRuntime(state);
                 auto client=std::make_unique<mkwvc::VoiceClient>(
                     memberId,
-                    std::move(transport));
+                    std::move(transport),
+                    state.inputDevice,
+                    state.outputDevice);
+                client->setMicrophoneGain(state.microphoneGain);
+                client->setAudioProcessingSettings(state.audioProcessing);
+                client->setPlaybackVolume(state.playbackVolume);
+                const bool held=pushToTalkHeld(state);
+                client->setTransmitEnabled(!state.microphoneTest && !state.microphoneMuted && !state.deafened && held);
+                client->setDeafened(state.deafened || state.microphoneTest);
+                client->setMicrophoneTestEnabled(state.microphoneTest && held);
                 client->start();
                 state.voiceClient=std::move(client);
             } else {
@@ -371,6 +459,7 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
                 input.localRoomActive
                     ? "Waiting for resolved RR room"
                     : "Inactive");
+            applyVoiceControls(state);
             return;
         }
 
@@ -426,6 +515,7 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
         }
 
         if (!state.signaling) {
+            applyVoiceControls(state);
             return;
         }
 
@@ -583,10 +673,12 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
         if (reconnect) {
             state.signaling.reset();
             state.nextReconnect = now + kReconnectDelay;
+            applyVoiceControls(state);
             return;
         }
 
         pollPeerLinks(state);
+        applyVoiceControls(state);
     } catch (const std::exception& error) {
         auto& state = voiceSessionState();
         std::lock_guard<std::mutex> lock(state.mutex);
@@ -601,6 +693,149 @@ EmbeddedVoiceSessionStatus embeddedVoiceSessionStatus() {
     auto& state = voiceSessionState();
     std::lock_guard<std::mutex> lock(state.mutex);
     return state.status;
+}
+
+EmbeddedVoiceControls embeddedVoiceControls() {
+    auto& state=voiceSessionState();
+    std::lock_guard<std::mutex> lock(state.mutex);
+
+    EmbeddedVoiceControls controls;
+    controls.inputDevices=state.inputDevices;
+    controls.outputDevices=state.outputDevices;
+    controls.inputDevice=state.inputDevice;
+    controls.outputDevice=state.outputDevice;
+    controls.automaticNormalization=state.audioProcessing.normalization;
+    controls.noiseSuppression=state.audioProcessing.noiseSuppression;
+    controls.noiseSuppressionStrength=state.audioProcessing.noiseSuppressionStrength;
+    controls.microphoneGain=state.microphoneGain;
+    controls.playbackVolume=state.playbackVolume;
+    controls.microphoneMuted=state.microphoneMuted;
+    controls.deafened=state.deafened;
+    controls.pushToTalk=state.pushToTalk;
+    controls.microphoneTest=state.microphoneTest;
+    controls.pushToTalkHeld=pushToTalkHeld(state);
+    controls.error=state.controlError;
+
+    if(state.voiceClient) {
+        const auto stats=state.voiceClient->stats();
+        controls.micPeak=stats.micPeak;
+        controls.playbackPeak=stats.playbackPeak;
+        for(const auto& peer:state.voiceClient->peerStats()) {
+            EmbeddedVoicePeerControl control;
+            control.memberId=peer.memberId;
+            if(const auto found=state.developmentPeers.find(peer.memberId);found!=state.developmentPeers.end()) {
+                control.participantId=found->second;
+            }
+            control.volume=peer.volume;
+            controls.peers.push_back(std::move(control));
+        }
+    } else if(state.microphoneTestRuntime) {
+        controls.micPeak=state.microphoneTestRuntime->micPeak();
+    }
+
+    return controls;
+}
+
+void refreshEmbeddedVoiceDevices() {
+    auto inputs=AudioEngine::captureDevices();
+    auto outputs=AudioEngine::playbackDevices();
+    auto& state=voiceSessionState();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.inputDevices=std::move(inputs);
+    state.outputDevices=std::move(outputs);
+}
+
+void setEmbeddedVoiceInputDevice(std::string device) {
+    auto& state=voiceSessionState();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if(device==state.inputDevice) return;
+    try {
+        if(state.voiceClient) state.voiceClient->setCaptureDevice(device);
+        if(state.microphoneTestRuntime) state.microphoneTestRuntime->setCaptureDevice(device);
+        state.inputDevice=std::move(device);
+        state.controlError.clear();
+    } catch(const std::exception& error) {
+        state.controlError=error.what();
+    }
+}
+
+void setEmbeddedVoiceOutputDevice(std::string device) {
+    auto& state=voiceSessionState();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if(device==state.outputDevice) return;
+    try {
+        if(state.voiceClient) state.voiceClient->setPlaybackDevice(device);
+        if(state.microphoneTestRuntime) state.microphoneTestRuntime->setPlaybackDevice(device);
+        state.outputDevice=std::move(device);
+        state.controlError.clear();
+    } catch(const std::exception& error) {
+        state.controlError=error.what();
+    }
+}
+
+void setEmbeddedVoiceProcessing(bool normalization,bool noiseSuppression,int noiseSuppressionStrength) {
+    auto& state=voiceSessionState();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.audioProcessing.normalization=normalization;
+    state.audioProcessing.noiseSuppression=noiseSuppression;
+    state.audioProcessing.noiseSuppressionStrength=std::clamp(noiseSuppressionStrength,0,100);
+    if(state.voiceClient) state.voiceClient->setAudioProcessingSettings(state.audioProcessing);
+    if(state.microphoneTestRuntime) state.microphoneTestRuntime->setAudioProcessingSettings(state.audioProcessing);
+    state.controlError.clear();
+}
+
+void setEmbeddedVoiceMicrophoneGain(float gain) {
+    auto& state=voiceSessionState();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.microphoneGain=std::clamp(gain,0.25f,5.0f);
+    if(state.voiceClient) state.voiceClient->setMicrophoneGain(state.microphoneGain);
+    if(state.microphoneTestRuntime) state.microphoneTestRuntime->setMicrophoneGain(state.microphoneGain);
+    state.controlError.clear();
+}
+
+void setEmbeddedVoicePlaybackVolume(float volume) {
+    auto& state=voiceSessionState();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.playbackVolume=std::clamp(volume,0.0f,3.0f);
+    if(state.voiceClient) state.voiceClient->setPlaybackVolume(state.playbackVolume);
+    if(state.microphoneTestRuntime) state.microphoneTestRuntime->setPlaybackVolume(state.playbackVolume);
+    state.controlError.clear();
+}
+
+void setEmbeddedVoiceMicrophoneMuted(bool muted) {
+    auto& state=voiceSessionState();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.microphoneMuted=muted;
+    applyVoiceControls(state);
+}
+
+void setEmbeddedVoiceDeafened(bool deafened) {
+    auto& state=voiceSessionState();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.deafened=deafened;
+    applyVoiceControls(state);
+}
+
+void setEmbeddedVoicePushToTalk(bool enabled) {
+    auto& state=voiceSessionState();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.pushToTalk=enabled;
+    if(enabled) state.microphoneMuted=false;
+    applyVoiceControls(state);
+}
+
+void setEmbeddedVoiceMicrophoneTest(bool enabled) {
+    auto& state=voiceSessionState();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.microphoneTest=enabled;
+    state.controlError.clear();
+    applyVoiceControls(state);
+}
+
+void setEmbeddedVoicePeerVolume(const std::string& memberId,float volume) {
+    auto& state=voiceSessionState();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if(state.voiceClient) state.voiceClient->setRemoteVolume(memberId,std::clamp(volume,0.0f,3.0f));
 }
 
 }
