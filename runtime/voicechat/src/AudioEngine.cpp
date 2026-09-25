@@ -9,8 +9,51 @@
 #include <atomic>
 #include <exception>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace mkwvc {
+
+namespace {
+
+std::vector<std::string> numberedDeviceNames(
+    const ma_device_info* infos,
+    ma_uint32 count) {
+    std::unordered_map<std::string,std::size_t> totals;
+    for(ma_uint32 i=0;i<count;++i) ++totals[infos[i].name];
+
+    std::unordered_map<std::string,std::size_t> seen;
+    std::vector<std::string> result;
+    result.reserve(count);
+    for(ma_uint32 i=0;i<count;++i) {
+        const std::string raw=infos[i].name;
+        const auto occurrence=++seen[raw];
+        if(totals[raw]>1) {
+            result.push_back(raw+" ["+std::to_string(occurrence)+"]");
+        } else {
+            result.push_back(raw);
+        }
+    }
+    return result;
+}
+
+const ma_device_id* resolveDeviceId(
+    const std::string& selected,
+    ma_device_info* infos,
+    ma_uint32 count) {
+    if(selected.empty()) return nullptr;
+
+    const auto labels=numberedDeviceNames(infos,count);
+    for(ma_uint32 i=0;i<count;++i) {
+        if(selected==labels[i]) return &infos[i].id;
+    }
+
+    for(ma_uint32 i=0;i<count;++i) {
+        if(selected==infos[i].name) return &infos[i].id;
+    }
+    return nullptr;
+}
+
+}
 
 class AudioEngine::Impl {
 public:
@@ -123,27 +166,15 @@ private:
             }
 
             if(!captureDevice.empty()) {
-                const ma_device_id* selectedId=nullptr;
-                for(ma_uint32 i=0;i<captureCount;++i) {
-                    if(captureDevice==captureInfos[i].name) {
-                        selectedId=&captureInfos[i].id;
-                        break;
-                    }
-                }
-
+                const ma_device_id* selectedId=resolveDeviceId(
+                    captureDevice,captureInfos,captureCount);
                 if(!selectedId) throw std::runtime_error("Selected input device is no longer available");
                 config.capture.pDeviceID=selectedId;
             }
 
             if(!playbackDevice.empty()) {
-                const ma_device_id* selectedId=nullptr;
-                for(ma_uint32 i=0;i<playbackCount;++i) {
-                    if(playbackDevice==playbackInfos[i].name) {
-                        selectedId=&playbackInfos[i].id;
-                        break;
-                    }
-                }
-
+                const ma_device_id* selectedId=resolveDeviceId(
+                    playbackDevice,playbackInfos,playbackCount);
                 if(!selectedId) throw std::runtime_error("Selected output device is no longer available");
                 config.playback.pDeviceID=selectedId;
             }
@@ -207,8 +238,7 @@ std::vector<std::string> AudioEngine::captureDevices() {
     std::vector<std::string> devices;
 
     if(ma_context_get_devices(&context,&playbackInfos,&playbackCount,&captureInfos,&captureCount)==MA_SUCCESS) {
-        devices.reserve(captureCount);
-        for(ma_uint32 i=0;i<captureCount;++i) devices.emplace_back(captureInfos[i].name);
+        devices=numberedDeviceNames(captureInfos,captureCount);
     }
 
     ma_context_uninit(&context);
@@ -226,8 +256,7 @@ std::vector<std::string> AudioEngine::playbackDevices() {
     std::vector<std::string> devices;
 
     if(ma_context_get_devices(&context,&playbackInfos,&playbackCount,&captureInfos,&captureCount)==MA_SUCCESS) {
-        devices.reserve(playbackCount);
-        for(ma_uint32 i=0;i<playbackCount;++i) devices.emplace_back(playbackInfos[i].name);
+        devices=numberedDeviceNames(playbackInfos,playbackCount);
     }
 
     ma_context_uninit(&context);
