@@ -3,6 +3,7 @@
 #include <speex/speex_preprocess.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <mutex>
 #include <stdexcept>
@@ -128,16 +129,25 @@ public:
         const float ratio=1.0f+static_cast<float>(settings_.compressorStrength)*0.07f;
 
         if(boost!=1.0f || compress) {
-            for(auto& sample:samples) {
-                float value=static_cast<float>(sample)*boost;
+            std::array<float,VoiceFormat::FrameSamples> dynamics{};
+            float dynamicsPeak=0.0f;
+            for(std::size_t i=0;i<samples.size();++i) {
+                float value=static_cast<float>(samples[i])*boost;
                 if(compress) {
                     const float sign=value<0.0f ? -1.0f : 1.0f;
                     float magnitude=std::abs(value);
                     if(magnitude>threshold) magnitude=threshold+(magnitude-threshold)/ratio;
                     value=sign*magnitude;
                 }
-                sample=static_cast<std::int16_t>(
-                    std::clamp(static_cast<std::int32_t>(std::lround(value)),-32768,32767));
+                dynamics[i]=value;
+                dynamicsPeak=std::max(dynamicsPeak,std::abs(value));
+            }
+
+            constexpr float dynamicsCeiling=30000.0f;
+            const float limiter=dynamicsPeak>dynamicsCeiling ? dynamicsCeiling/dynamicsPeak : 1.0f;
+            for(std::size_t i=0;i<samples.size();++i) {
+                const auto value=static_cast<std::int32_t>(std::lround(dynamics[i]*limiter));
+                samples[i]=static_cast<std::int16_t>(std::clamp(value,-32768,32767));
             }
         }
     }
