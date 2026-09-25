@@ -43,6 +43,10 @@ struct PeerVoiceStats {
     std::uint32_t jitterBufferCurrentMs=0;
     float estimatedJitterMs=0.0f;
     float volume=1.0f;
+    std::uint32_t voicePeak=0;
+    bool speaking=false;
+    bool remoteMuted=false;
+    bool remoteDeafened=false;
     bool receiverRunning=false;
 };
 
@@ -71,6 +75,7 @@ struct VoiceStats {
     float estimatedJitterMs=0.0f;
     std::uint32_t micPeak=0;
     std::uint32_t playbackPeak=0;
+    bool transmitting=false;
     bool running=false;
 };
 
@@ -104,6 +109,8 @@ public:
     void setRemoteVolume(float volume);
     void setRemoteVolume(const std::string& memberId,float volume);
     void setTransmitEnabled(bool enabled);
+    void setLocalStatus(bool muted,bool deafened);
+    void setVoiceActivation(bool enabled,float threshold);
     void setDeafened(bool deafened);
 
     std::string localAddress() const;
@@ -161,6 +168,11 @@ private:
     std::atomic<float> microphoneGain_{1.0f};
     std::atomic<float> playbackVolume_{1.0f};
     std::atomic<bool> transmitEnabled_{true};
+    std::atomic<bool> localMutedStatus_{false};
+    std::atomic<bool> localDeafenedStatus_{false};
+    std::atomic<bool> voiceActivationEnabled_{false};
+    std::atomic<float> voiceActivationThreshold_{0.04f};
+    std::atomic<bool> transmitting_{false};
     std::atomic<bool> deafened_{false};
     std::atomic<bool> microphoneTestEnabled_{false};
 
