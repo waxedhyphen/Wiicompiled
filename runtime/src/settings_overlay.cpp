@@ -1205,7 +1205,7 @@ void DrawVoiceChatSettings() {
     };
 
     ImGui::TextUnformatted("Retro Rewind voice integration");
-    ImGui::TextDisabled("Integration: voice-bridge-v15-user-features-stage4c");
+    ImGui::TextDisabled("Integration: voice-bridge-v16-user-features-stage4c");
     ImGui::SeparatorText("Voice controls");
 
     const std::string localName=playerNameFor(identity.profileId);
