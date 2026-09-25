@@ -1301,17 +1301,21 @@ void resetEmbeddedVoiceAudioSettings() {
         volume=1.0f;
         persistFloat("peer_volume_"+participantId,1.0f);
     }
-    if(state.voiceClient) {
-        state.voiceClient->setCaptureDevice({});
-        state.voiceClient->setPlaybackDevice({});
-        state.voiceClient->setAudioProcessingSettings(state.audioProcessing);
-        state.voiceClient->setMicrophoneGain(1.0f);
-        state.voiceClient->setPlaybackVolume(1.0f);
-        state.voiceClient->setRemoteVolume(1.0f);
+    try {
+        if(state.voiceClient) {
+            state.voiceClient->setCaptureDevice({});
+            state.voiceClient->setPlaybackDevice({});
+            state.voiceClient->setAudioProcessingSettings(state.audioProcessing);
+            state.voiceClient->setMicrophoneGain(1.0f);
+            state.voiceClient->setPlaybackVolume(1.0f);
+            state.voiceClient->setRemoteVolume(1.0f);
+        }
+        stopMicrophoneTestRuntime(state);
+        applyVoiceControls(state);
+        state.controlError.clear();
+    } catch(const std::exception& error) {
+        state.controlError=error.what();
     }
-    stopMicrophoneTestRuntime(state);
-    applyVoiceControls(state);
-    state.controlError.clear();
 }
 
 void playEmbeddedVoiceTestTone() {
