@@ -43,11 +43,13 @@ public:
 
     void setSettings(const AudioProcessingSettings& settings) {
         std::scoped_lock lock(mutex_);
-        settings_=settings;
-        settings_.noiseSuppressionStrength=std::clamp(settings_.noiseSuppressionStrength,0,100);
-        settings_.noiseGateThreshold=std::clamp(settings_.noiseGateThreshold,0,100);
-        settings_.microphoneBoost=std::clamp(settings_.microphoneBoost,1.0f,3.0f);
-        settings_.compressorStrength=std::clamp(settings_.compressorStrength,0,100);
+        auto next=settings;
+        next.noiseSuppressionStrength=std::clamp(next.noiseSuppressionStrength,0,100);
+        next.noiseGateThreshold=std::clamp(next.noiseGateThreshold,0,100);
+        next.microphoneBoost=std::clamp(next.microphoneBoost,1.0f,3.0f);
+        next.compressorStrength=std::clamp(next.compressorStrength,0,100);
+        if(next==settings_) return;
+        settings_=next;
         normalizationGain_=1.0f;
         gateGain_=1.0f;
         gateOpen_=true;
