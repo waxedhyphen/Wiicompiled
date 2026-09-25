@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <span>
 #include <thread>
@@ -22,10 +23,20 @@ std::uint32_t peakOf(std::span<const std::int16_t> samples) {
     return peak;
 }
 
-void applyGain(std::span<std::int16_t> samples,float gain) {
-    if(gain==1.0f) return;
+void applyGain(std::span<std::int16_t> samples,float gain,float& limiterGain) {
+    gain=std::max(0.0f,gain);
+    float peak=0.0f;
+    for(const auto sample:samples) peak=std::max(peak,std::abs(static_cast<float>(sample))*gain);
+
+    constexpr float ceiling=31600.0f;
+    const float desired=peak>ceiling ? ceiling/peak : 1.0f;
+    if(desired<limiterGain) limiterGain=desired;
+    else limiterGain+=(desired-limiterGain)*0.06f;
+    limiterGain=std::clamp(limiterGain,0.0f,1.0f);
+
+    const float totalGain=gain*limiterGain;
     for(auto& sample:samples) {
-        const auto scaled=static_cast<std::int32_t>(static_cast<float>(sample)*gain);
+        const auto scaled=static_cast<std::int32_t>(std::lround(static_cast<float>(sample)*totalGain));
         sample=static_cast<std::int16_t>(std::clamp(scaled,-32768,32767));
     }
 }
@@ -92,6 +103,8 @@ void MicrophoneTest::loop() {
     std::array<std::int16_t,VoiceFormat::FrameSamples> samples{};
     std::array<std::int16_t,VoiceFormat::FrameSamples> monitor{};
     std::size_t filled=0;
+    float microphoneLimiterGain=1.0f;
+    float monitorLimiterGain=1.0f;
 
     while(running_) {
         filled+=audio_.readCaptured(std::span<std::int16_t>(samples).subspan(filled));
@@ -101,12 +114,12 @@ void MicrophoneTest::loop() {
         }
 
         processor_.processCapture(samples);
-        applyGain(samples,microphoneGain_.load(std::memory_order_relaxed));
+        applyGain(samples,microphoneGain_.load(std::memory_order_relaxed),microphoneLimiterGain);
         micPeak_.store(peakOf(samples),std::memory_order_relaxed);
 
         if(monitorEnabled_.load(std::memory_order_relaxed)) {
             std::copy(samples.begin(),samples.end(),monitor.begin());
-            applyGain(monitor,playbackVolume_.load(std::memory_order_relaxed));
+            applyGain(monitor,playbackVolume_.load(std::memory_order_relaxed),monitorLimiterGain);
             audio_.queueMonitor(monitor);
         }
         filled=0;
