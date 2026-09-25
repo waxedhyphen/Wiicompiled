@@ -219,31 +219,20 @@ public:
         sendCommand("RR_ADMIT "+roomInstanceId);
     }
 
-    void admitRetroRewindDevelopment(std::string profileId,std::string roomInstanceId) {
+    void admitRetroRewindDevelopment(std::string profileId) {
         profileId.erase(
             std::remove_if(profileId.begin(),profileId.end(),[](unsigned char ch){return std::isspace(ch)!=0;}),
             profileId.end()
         );
-        roomInstanceId.erase(
-            std::remove_if(roomInstanceId.begin(),roomInstanceId.end(),[](unsigned char ch){return std::isspace(ch)!=0;}),
-            roomInstanceId.end()
-        );
-        std::transform(roomInstanceId.begin(),roomInstanceId.end(),roomInstanceId.begin(),[](unsigned char ch){
-            return static_cast<char>(std::toupper(ch));
-        });
 
         const bool validProfile=
             !profileId.empty() &&
             profileId.size()<=10 &&
             std::all_of(profileId.begin(),profileId.end(),[](unsigned char ch){return std::isdigit(ch)!=0;});
-        const bool validRoom=
-            roomInstanceId.size()==64 &&
-            std::all_of(roomInstanceId.begin(),roomInstanceId.end(),[](unsigned char ch){return std::isxdigit(ch)!=0;});
 
         if(!validProfile) throw std::invalid_argument("Retro Rewind profile ID must be a decimal uint32 value");
-        if(!validRoom) throw std::invalid_argument("Retro Rewind room instance is invalid");
 
-        sendCommand("RR_DEV_ADMIT "+profileId+" "+roomInstanceId);
+        sendCommand("RR_DEV_ADMIT "+profileId);
     }
 
     void debugLookupRetroRewind(std::string profileId) {
@@ -442,7 +431,7 @@ void SignalingClient::sendSignal(std::string signal){impl_->sendSignal(std::move
 void SignalingClient::sendSignal(std::string memberId,std::string signal){impl_->sendSignal(std::move(memberId),std::move(signal));}
 void SignalingClient::authenticateRetroRewind(std::string profileId,std::string sessionKey,std::string gameName){impl_->authenticateRetroRewind(std::move(profileId),std::move(sessionKey),std::move(gameName));}
 void SignalingClient::admitRetroRewindRoom(std::string roomInstanceId){impl_->admitRetroRewindRoom(std::move(roomInstanceId));}
-void SignalingClient::admitRetroRewindDevelopment(std::string profileId,std::string roomInstanceId){impl_->admitRetroRewindDevelopment(std::move(profileId),std::move(roomInstanceId));}
+void SignalingClient::admitRetroRewindDevelopment(std::string profileId){impl_->admitRetroRewindDevelopment(std::move(profileId));}
 void SignalingClient::debugLookupRetroRewind(std::string profileId){impl_->debugLookupRetroRewind(std::move(profileId));}
 void SignalingClient::setDebugRetroRewindPresence(std::string profileId){impl_->setDebugRetroRewindPresence(std::move(profileId));}
 void SignalingClient::clearDebugRetroRewindPresence(){impl_->clearDebugRetroRewindPresence();}
