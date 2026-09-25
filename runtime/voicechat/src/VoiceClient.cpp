@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -86,6 +87,24 @@ std::uint32_t peakOf(std::span<const std::int16_t> samples) {
         peak=std::max(peak,value);
     }
     return peak;
+}
+
+void applyGainWithLimiter(std::span<std::int16_t> samples,float gain,float& limiterGain) {
+    gain=std::max(0.0f,gain);
+    float peak=0.0f;
+    for(const auto sample:samples) peak=std::max(peak,std::abs(static_cast<float>(sample))*gain);
+
+    constexpr float ceiling=31600.0f;
+    const float desired=peak>ceiling ? ceiling/peak : 1.0f;
+    if(desired<limiterGain) limiterGain=desired;
+    else limiterGain+=std::min(1.0f,desired-limiterGain)*0.06f;
+    limiterGain=std::clamp(limiterGain,0.0f,1.0f);
+
+    const float totalGain=gain*limiterGain;
+    for(auto& sample:samples) {
+        const auto scaled=static_cast<std::int32_t>(std::lround(static_cast<float>(sample)*totalGain));
+        sample=static_cast<std::int16_t>(std::clamp(scaled,-32768,32767));
+    }
 }
 
 }
@@ -432,6 +451,8 @@ void VoiceClient::senderLoop() {
 
     std::uint32_t sequence=0;
     std::size_t filled=0;
+    float microphoneLimiterGain=1.0f;
+    float monitorLimiterGain=1.0f;
     OpusCodecSettings appliedSettings{};
     bool settingsApplied=false;
 
@@ -477,24 +498,14 @@ void VoiceClient::senderLoop() {
             processor_.processCapture(samples);
 
             const auto gain=microphoneGain_.load(std::memory_order_relaxed);
-            if(gain!=1.0f) {
-                for(auto& sample:samples) {
-                    const auto scaled=static_cast<std::int32_t>(static_cast<float>(sample)*gain);
-                    sample=static_cast<std::int16_t>(std::clamp(scaled,-32768,32767));
-                }
-            }
+            applyGainWithLimiter(samples,gain,microphoneLimiterGain);
 
             const bool microphoneTest=microphoneTestEnabled_.load(std::memory_order_relaxed);
             const auto processedPeak=peakOf(samples);
             if(microphoneTest) {
                 std::copy(samples.begin(),samples.end(),monitor.begin());
                 const auto monitorVolume=playbackVolume_.load(std::memory_order_relaxed);
-                if(monitorVolume!=1.0f) {
-                    for(auto& sample:monitor) {
-                        const auto scaled=static_cast<std::int32_t>(static_cast<float>(sample)*monitorVolume);
-                        sample=static_cast<std::int16_t>(std::clamp(scaled,-32768,32767));
-                    }
-                }
+                applyGainWithLimiter(monitor,monitorVolume,monitorLimiterGain);
                 audio_.queueMonitor(monitor);
             }
 
@@ -717,11 +728,12 @@ void VoiceClient::receiverLoop(const std::shared_ptr<PeerState>& peer) {
 
 void VoiceClient::mixerLoop() {
     auto nextMix=std::chrono::steady_clock::now();
+    float limiterGain=1.0f;
 
     while(running_.load(std::memory_order_relaxed)) {
         nextMix+=std::chrono::milliseconds(VoiceFormat::FrameDurationMs);
 
-        std::array<std::int32_t,VoiceFormat::FrameSamples> mixed{};
+        std::array<float,VoiceFormat::FrameSamples> mixed{};
         PcmFrame frame{};
         bool anyFrame=false;
 
@@ -732,9 +744,7 @@ void VoiceClient::mixerLoop() {
 
             anyFrame=true;
             const auto volume=peer->volume.load(std::memory_order_relaxed);
-            for(std::size_t i=0;i<frame.size();++i) {
-                mixed[i]+=static_cast<std::int32_t>(static_cast<float>(frame[i])*volume);
-            }
+            for(std::size_t i=0;i<frame.size();++i) mixed[i]+=static_cast<float>(frame[i])*volume;
         }
 
         if(deafened_.load(std::memory_order_relaxed)) {
@@ -742,9 +752,18 @@ void VoiceClient::mixerLoop() {
         } else if(anyFrame) {
             PcmFrame output{};
             const auto globalVolume=playbackVolume_.load(std::memory_order_relaxed);
+            float peak=0.0f;
+            for(const auto sample:mixed) peak=std::max(peak,std::abs(sample*globalVolume));
 
+            constexpr float ceiling=31600.0f;
+            const float desired=peak>ceiling ? ceiling/peak : 1.0f;
+            if(desired<limiterGain) limiterGain=desired;
+            else limiterGain+=(desired-limiterGain)*0.05f;
+            limiterGain=std::clamp(limiterGain,0.0f,1.0f);
+
+            const float finalGain=globalVolume*limiterGain;
             for(std::size_t i=0;i<output.size();++i) {
-                const auto scaled=static_cast<std::int32_t>(static_cast<float>(mixed[i])*globalVolume);
+                const auto scaled=static_cast<std::int32_t>(std::lround(mixed[i]*finalGain));
                 output[i]=static_cast<std::int16_t>(std::clamp(scaled,-32768,32767));
             }
 
@@ -752,6 +771,7 @@ void VoiceClient::mixerLoop() {
             audio_.queuePlayback(std::span<const std::int16_t>(output));
         } else {
             playbackPeak_.store(0,std::memory_order_relaxed);
+            limiterGain+=(1.0f-limiterGain)*0.05f;
         }
 
         std::this_thread::sleep_until(nextMix);
