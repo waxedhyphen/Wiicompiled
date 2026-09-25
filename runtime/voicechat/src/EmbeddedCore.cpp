@@ -441,10 +441,9 @@ void clearPeerRuntime(EmbeddedVoiceSessionState& state) {
     state.status.voiceClientRunning=false;
 }
 
-void clearVoiceSessionLocked(
+void clearVoiceNetworkSessionLocked(
     EmbeddedVoiceSessionState& state,
     std::string status) {
-    stopMicrophoneTestRuntime(state);
     clearPeerRuntime(state);
     state.signaling.reset();
     state.profileId.clear();
@@ -454,6 +453,13 @@ void clearVoiceSessionLocked(
     state.nextReconnect = {};
     state.status = {};
     state.status.status = std::move(status);
+}
+
+void clearVoiceSessionLocked(
+    EmbeddedVoiceSessionState& state,
+    std::string status) {
+    stopMicrophoneTestRuntime(state);
+    clearVoiceNetworkSessionLocked(state,std::move(status));
 }
 
 void removePeer(
@@ -685,7 +691,7 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
             !input.profileId.empty();
 
         if (!active) {
-            clearVoiceSessionLocked(
+            clearVoiceNetworkSessionLocked(
                 state,
                 input.localRoomActive
                     ? "Waiting for resolved RR room"
