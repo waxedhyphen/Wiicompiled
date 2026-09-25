@@ -962,13 +962,21 @@ void DrawVoiceChatSettings() {
         }
         return profileId.empty() ? std::string("-") : profileId;
     };
+    const auto playerFriendCodeFor=[&](const std::string& profileId) {
+        for(const auto& player:room.players) {
+            if(player.profileId==profileId) return player.friendCode;
+        }
+        return std::string();
+    };
 
     ImGui::TextUnformatted("Retro Rewind voice integration");
-    ImGui::TextDisabled("Integration: voice-bridge-v12-embedded-controls-cleanbuild-stage4c");
+    ImGui::TextDisabled("Integration: voice-bridge-v13-single-socket-audio-persist-stage4c");
     ImGui::SeparatorText("Voice controls");
 
     const std::string localName=playerNameFor(identity.profileId);
-    ImGui::Text("Display name: %s",localName.c_str());
+    const std::string localFriendCode=playerFriendCodeFor(identity.profileId);
+    if(localFriendCode.empty()) ImGui::Text("Display name: %s",localName.c_str());
+    else ImGui::Text("Display name: %s [%s]",localName.c_str(),localFriendCode.c_str());
 
     ImGui::TextUnformatted("Audio input");
     const std::string inputPreview=controls.inputDevice.empty() ? "System default" : controls.inputDevice;
@@ -1120,12 +1128,10 @@ void DrawVoiceChatSettings() {
             ImGui::PushID(peer.memberId.c_str());
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
-            const std::string peerName=playerNameFor(peer.participantId);
-            ImGui::TextUnformatted(peerName.c_str());
-            if(!peer.participantId.empty()) {
-                ImGui::SameLine();
-                ImGui::TextDisabled("(PID %s)",peer.participantId.c_str());
-            }
+            const std::string peerName=peer.displayName.empty() ? playerNameFor(peer.participantId) : peer.displayName;
+            const std::string peerFriendCode=peer.friendCode.empty() ? playerFriendCodeFor(peer.participantId) : peer.friendCode;
+            if(peerFriendCode.empty()) ImGui::TextUnformatted(peerName.c_str());
+            else ImGui::Text("%s [%s]",peerName.c_str(),peerFriendCode.c_str());
             ImGui::TableNextColumn();
             int peerVolume=static_cast<int>(peer.volume*100.0f+0.5f);
             ImGui::SetNextItemWidth(-1.0f);
@@ -1133,15 +1139,14 @@ void DrawVoiceChatSettings() {
                 mkwvc::setEmbeddedVoicePeerVolume(peer.memberId,static_cast<float>(peerVolume)/100.0f);
             }
             ImGui::TableNextColumn();
-            ImGui::BeginDisabled(peer.volume<=0.0f);
-            if(ImGui::Button("Mute",ImVec2(-1.0f,0.0f))) {
-                mkwvc::setEmbeddedVoicePeerVolume(peer.memberId,0.0f);
+            const bool peerMuted=peer.volume<=0.0f;
+            if(ImGui::Button(peerMuted ? "Unmute" : "Mute",ImVec2(-1.0f,0.0f))) {
+                mkwvc::setEmbeddedVoicePeerVolume(peer.memberId,peerMuted ? 1.0f : 0.0f);
+                controls=mkwvc::embeddedVoiceControls();
             }
-            ImGui::EndDisabled();
             ImGui::PopID();
         }
         ImGui::EndTable();
-        ImGui::TextDisabled("Peer volume is session-only for now and is not saved.");
     }
 
     ImGui::SeparatorText("Live GPCM identity");
@@ -1198,10 +1203,16 @@ void DrawVoiceChatSettings() {
         ImGui::Text("Created: %s", room.created.c_str());
         ImGui::Text("Players: %zu", room.players.size());
         for (const auto& player : room.players) {
-            ImGui::BulletText("%s (PID %s)%s",
-                              player.name.c_str(),
-                              player.profileId.c_str(),
-                              player.voiceChat ? " [Voice Chat]" : "");
+            if(player.friendCode.empty()) {
+                ImGui::BulletText("%s%s",
+                                  player.name.c_str(),
+                                  player.voiceChat ? " [Voice Chat]" : "");
+            } else {
+                ImGui::BulletText("%s [%s]%s",
+                                  player.name.c_str(),
+                                  player.friendCode.c_str(),
+                                  player.voiceChat ? " [Voice Chat]" : "");
+            }
         }
         ImGui::TextDisabled(
             "Public RWFC roster discovery only; this is not secure voice authorization yet.");
