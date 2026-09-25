@@ -1070,7 +1070,7 @@ void ServiceVoiceHotkeys() {
 
     const bool mute=VoiceBindingActive(controls.muteBinding);
     const bool deafen=VoiceBindingActive(controls.deafenBinding);
-    if(mute && !previousMute) {
+    if(!controls.pushToTalk && mute && !previousMute) {
         mkwvc::setEmbeddedVoiceMicrophoneMuted(!controls.microphoneMuted);
     }
     if(deafen && !previousDeafen) {
@@ -1409,6 +1409,7 @@ void DrawVoiceChatSettings() {
     }
 
     ImGui::SeparatorText("Status");
+    ImGui::BeginDisabled(controls.pushToTalk);
     if(controls.microphoneMuted) {
         ImGui::PushStyleColor(ImGuiCol_Button,ImVec4(0.68f,0.12f,0.12f,1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered,ImVec4(0.82f,0.16f,0.16f,1.0f));
@@ -1419,6 +1420,7 @@ void DrawVoiceChatSettings() {
         controls=mkwvc::embeddedVoiceControls();
     }
     if(controls.microphoneMuted) ImGui::PopStyleColor(3);
+    ImGui::EndDisabled();
 
     ImGui::SameLine();
     if(controls.deafened) {
