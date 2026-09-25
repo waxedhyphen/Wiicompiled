@@ -153,6 +153,7 @@ add_library(mkw_voicechat_core_stage3 STATIC
 target_include_directories(mkw_voicechat_core_stage3
     PUBLIC "${CMAKE_CURRENT_LIST_DIR}/include"
     PRIVATE "${CMAKE_CURRENT_LIST_DIR}/../include"
+    PRIVATE "${CMAKE_CURRENT_LIST_DIR}/../third_party/toml11"
     PRIVATE "${MKWVC_MINIAUDIO_DIR}")
 target_compile_features(mkw_voicechat_core_stage3 PRIVATE cxx_std_23)
 target_compile_definitions(mkw_voicechat_core_stage3 PRIVATE
