@@ -131,10 +131,10 @@ void persistInt(std::string_view key,int value) {
 void loadSettingsLocked(EmbeddedVoiceSessionState& state) {
     if(state.settingsLoaded) return;
     state.settingsLoaded=true;
-    state.inputDevices=mkwvc::AudioEngine::captureDevices();
-    state.outputDevices=mkwvc::AudioEngine::playbackDevices();
 
     try {
+        state.inputDevices=mkwvc::AudioEngine::captureDevices();
+        state.outputDevices=mkwvc::AudioEngine::playbackDevices();
         const auto path=RuntimeConfigFile::ResolveConfigPath();
         std::ifstream input(path,std::ios::binary);
         if(!input) return;
