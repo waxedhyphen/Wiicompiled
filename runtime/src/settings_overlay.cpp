@@ -1179,11 +1179,8 @@ void DrawVoiceChatSettings() {
     }
 
     if(!controls.enabled) {
-        ImGui::Dummy(ImVec2(430.0f,0.0f));
-        ImGui::PushTextWrapPos(ImGui::GetCursorPosX()+430.0f);
-        ImGui::TextUnformatted(
+        ImGui::TextWrapped(
             "Voice Chat is disabled. Enable it to connect to other Voice Chat users in your current Retro Rewind room.");
-        ImGui::PopTextWrapPos();
         return;
     }
 
@@ -1880,9 +1877,14 @@ void DrawTopBar() {
         ImGui::EndMenu();
     }
 
-    if (RuntimeProduct::IsRetroRewind() && ImGui::BeginMenu("Voice Chat")) {
-        DrawVoiceChatSettings();
-        ImGui::EndMenu();
+    if (RuntimeProduct::IsRetroRewind()) {
+        ImGui::SetNextWindowSizeConstraints(
+            ImVec2(430.0f, 0.0f),
+            ImVec2(430.0f, ImGui::GetMainViewport()->WorkSize.y));
+        if (ImGui::BeginMenu("Voice Chat")) {
+            DrawVoiceChatSettings();
+            ImGui::EndMenu();
+        }
     }
 
     const std::string audioLabel = g_audioMuted
