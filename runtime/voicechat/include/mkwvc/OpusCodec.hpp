@@ -8,9 +8,9 @@
 namespace mkwvc {
 
 struct OpusCodecSettings {
-    int bitrate=32000;
+    int bitrate=48000;
     int complexity=10;
-    int expectedPacketLossPercent=10;
+    int expectedPacketLossPercent=5;
     bool inbandFec=true;
     bool dtx=false;
 
