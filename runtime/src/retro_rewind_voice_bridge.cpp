@@ -985,147 +985,64 @@ IdentitySnapshot Snapshot() {
 
 void ServiceRoomLookup() noexcept {
     try {
-        const IdentitySnapshot identity = Snapshot();
-        const bool localRoomActive =
-            identity.online && !identity.profileId.empty() &&
+        const IdentitySnapshot identity=Snapshot();
+        const bool localRoomActive=
+            identity.online &&
+            !identity.profileId.empty() &&
             IsLocalRkNetRoomActive();
 
-        RoomLookupState& state = RoomState();
-        const auto now = std::chrono::steady_clock::now();
-
-        bool notifyWorker = false;
-        bool startWorker = false;
-
-        {
-            std::lock_guard<std::mutex> lock(state.mutex);
-            state.desiredOnline = identity.online && !identity.profileId.empty();
-            state.desiredIdentityGeneration = identity.generation;
-            state.desiredProfileId = identity.profileId;
-
-            const bool localRoomChanged =
-                state.observedRoomActive != localRoomActive;
-            state.desiredRoomActive = localRoomActive;
-            if (localRoomChanged) {
-                state.observedRoomActive = localRoomActive;
-                notifyWorker = state.workerRunning;
-
-                if (!localRoomActive) {
-                    // This is local game evidence, not a public-roster guess.
-                    // Stop the voice room immediately; the sender concurrently
-                    // issues RR_DEBUG_PRESENCE_CLEAR so remote voice clients
-                    // stop treating us as present as well.
-                    ClearLocalRoomSnapshotLocked(
-                        state,
-                        identity.generation,
-                        "Not currently connected to an RKNet room");
-                } else {
-                    state.snapshot = {};
-                    state.snapshot.localRoomActive = true;
-                    state.snapshot.identityGeneration = identity.generation;
-                    state.snapshot.profileId = identity.profileId;
-                    state.snapshot.status = "Local RKNet room active; verifying voice presence...";
-                }
-            }
-
-            if (!state.desiredOnline) {
-                notifyWorker = notifyWorker || state.workerRunning;
-                state.desiredRoomActive = false;
-                state.observedRoomActive = false;
-                state.nextReconnectAttempt = {};
-
-                if (state.observedIdentityGeneration != identity.generation ||
-                    state.snapshot.lookupInFlight ||
-                    state.snapshot.lookupComplete ||
-                    state.snapshot.roomFound) {
-                    state.observedIdentityGeneration = identity.generation;
-                    state.snapshot = {};
-                    state.snapshot.identityGeneration = identity.generation;
-                    state.snapshot.status = "Waiting for live Retro Rewind identity";
-                }
-            } else {
-                const bool identityChanged =
-                    state.observedIdentityGeneration != identity.generation;
-
-                if (identityChanged) {
-                    state.observedIdentityGeneration = identity.generation;
-                    state.nextReconnectAttempt = {};
-
-                    if (localRoomActive) {
-                        state.snapshot = {};
-                        state.snapshot.localRoomActive = true;
-                        state.snapshot.identityGeneration = identity.generation;
-                        state.snapshot.profileId = identity.profileId;
-                        state.snapshot.status =
-                            "Local RKNet room active; connecting to voice signaling...";
-                    } else {
-                        ClearLocalRoomSnapshotLocked(
-                            state,
-                            identity.generation,
-                            "Online, but not currently connected to an RKNet room");
-                    }
-                }
-
-                if (state.workerRunning) {
-                    if (state.workerIdentityGeneration != identity.generation) {
-                        notifyWorker = true;
-                    }
-                } else if (state.nextReconnectAttempt == std::chrono::steady_clock::time_point{} ||
-                           now >= state.nextReconnectAttempt) {
-                    state.workerRunning = true;
-                    state.workerIdentityGeneration = identity.generation;
-                    state.snapshot.signalingConnected = false;
-                    state.snapshot.presenceFrameSent = false;
-                    state.snapshot.signalingReplyReceived = false;
-                    state.snapshot.lookupInFlight = localRoomActive;
-                    state.snapshot.localRoomActive = localRoomActive;
-                    state.snapshot.identityGeneration = identity.generation;
-                    state.snapshot.profileId = identity.profileId;
-                    if (localRoomActive &&
-                        !state.snapshot.lookupComplete &&
-                        !state.snapshot.roomFound) {
-                        state.snapshot.status = "Connecting to voice signaling...";
-                    }
-                    startWorker = true;
-                }
-            }
-        }
-
-        if (notifyWorker) {
-            state.wake.notify_all();
-        }
-
-        if (startWorker) {
-            try {
-                std::thread(
-                    PersistentRoomWorker,
-                    identity.profileId,
-                    identity.generation).detach();
-            } catch (...) {
-                FinishRoomWorker(
-                    identity.generation,
-                    "Failed to start persistent RR signaling worker",
-                    true);
-            }
-        }
-
-        const RoomSnapshot room = Room();
         mkwvc::EmbeddedVoiceSessionInput voiceInput;
-        voiceInput.localRoomActive = room.localRoomActive;
-        voiceInput.roomFound = room.roomFound;
-        voiceInput.profileId = identity.profileId;
-        voiceInput.sessionKey = identity.sessionKey;
-        voiceInput.gameName = identity.gameName;
-        voiceInput.roomInstanceId = room.roomInstanceId;
-        voiceInput.identityGeneration = identity.generation;
+        voiceInput.localRoomActive=localRoomActive;
+        voiceInput.profileId=identity.profileId;
+        voiceInput.sessionKey=identity.sessionKey;
+        voiceInput.gameName=identity.gameName;
+        voiceInput.identityGeneration=identity.generation;
         mkwvc::serviceEmbeddedVoiceSession(voiceInput);
-    } catch (...) {
+    } catch(...) {
     }
 }
 
 RoomSnapshot Room() {
-    RoomLookupState& state = RoomState();
-    std::lock_guard<std::mutex> lock(state.mutex);
-    return state.snapshot;
+    const IdentitySnapshot identity=Snapshot();
+    const auto session=mkwvc::embeddedVoiceSessionStatus();
+
+    RoomSnapshot room;
+    room.localRoomActive=
+        identity.online &&
+        !identity.profileId.empty() &&
+        IsLocalRkNetRoomActive();
+    room.lookupInFlight=session.developmentAdmissionPending;
+    room.lookupComplete=session.developmentAdmitted || !session.status.empty();
+    room.lookupSucceeded=session.roomFound;
+    room.roomFound=room.localRoomActive && session.roomFound;
+    room.signalingConnected=session.signalingConnected;
+    room.presenceFrameSent=
+        session.developmentAdmissionPending ||
+        session.developmentAdmitted;
+    room.signalingReplyReceived=
+        session.developmentAdmitted ||
+        (!session.developmentAdmissionPending &&
+         session.lifecycleActive &&
+         session.signalingConnected &&
+         !session.status.empty());
+    room.status=session.status;
+    room.profileId=identity.profileId;
+    room.roomId=session.roomId;
+    room.roomInstanceId=session.roomInstanceId;
+    room.created=session.roomCreated;
+    room.identityGeneration=identity.generation;
+    room.players.reserve(session.roomPlayers.size());
+
+    for(const auto& source:session.roomPlayers) {
+        RoomPlayer player;
+        player.profileId=source.profileId;
+        player.name=source.displayName;
+        player.friendCode=source.friendCode;
+        player.voiceChat=source.voiceChat;
+        room.players.push_back(std::move(player));
+    }
+
+    return room;
 }
 
 } // namespace RetroRewindVoiceBridge
