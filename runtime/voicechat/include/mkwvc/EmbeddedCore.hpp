@@ -17,12 +17,17 @@ struct EmbeddedCoreStatus {
 
 struct EmbeddedVoiceSessionInput {
     bool localRoomActive = false;
-    bool roomFound = false;
     std::string profileId;
     std::string sessionKey;
     std::string gameName;
-    std::string roomInstanceId;
     std::uint64_t identityGeneration = 0;
+};
+
+struct EmbeddedVoiceRoomPlayer {
+    std::string profileId;
+    std::string displayName;
+    std::string friendCode;
+    bool voiceChat = false;
 };
 
 struct EmbeddedVoiceSessionStatus {
@@ -33,16 +38,22 @@ struct EmbeddedVoiceSessionStatus {
     bool developmentAdmissionPending = false;
     bool developmentAdmitted = false;
     bool voiceClientRunning = false;
+    bool roomFound = false;
     std::uint32_t developmentPeerCount = 0;
     std::uint32_t peerCount = 0;
+    std::string roomId;
     std::string roomInstanceId;
+    std::string roomCreated;
     std::string localMemberId;
+    std::vector<EmbeddedVoiceRoomPlayer> roomPlayers;
     std::string status;
 };
 
 struct EmbeddedVoicePeerControl {
     std::string memberId;
     std::string participantId;
+    std::string displayName;
+    std::string friendCode;
     float volume = 1.0f;
 };
 
