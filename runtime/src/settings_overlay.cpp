@@ -1224,7 +1224,7 @@ void DrawVoiceChatSettings() {
     };
 
     ImGui::TextUnformatted("Retro Rewind voice integration");
-    ImGui::TextDisabled("Integration: voice-bridge-v20-overlay-audio-stage4c");
+    ImGui::TextDisabled("Integration: voice-bridge-v21-overlay-audio-stage4c");
 
     const std::string localName=playerNameFor(identity.profileId);
     const std::string localFriendCode=playerFriendCodeFor(identity.profileId);
