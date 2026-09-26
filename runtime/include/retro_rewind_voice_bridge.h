@@ -34,6 +34,7 @@ struct RoomPlayer {
     std::string name;
     std::string friendCode;
     bool voiceChat = false;
+    bool isFriend = false;
 };
 
 struct RoomSnapshot {
