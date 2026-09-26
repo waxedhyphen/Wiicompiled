@@ -24,7 +24,7 @@ std::uint32_t peakOf(std::span<const std::int16_t> samples) {
 }
 
 constexpr float BaseMicrophoneGain=1.35f;
-constexpr float BasePlaybackGain=1.35f;
+constexpr float BasePlaybackGain=3.375f;
 
 float softLimit(float value) {
     constexpr float knee=30000.0f;
