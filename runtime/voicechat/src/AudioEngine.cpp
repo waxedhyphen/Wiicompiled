@@ -80,6 +80,8 @@ public:
 
     void start() {
         if(running_) return;
+        playbackPrimed_=false;
+        monitorPrimed_=false;
         if(ma_device_start(&device_)!=MA_SUCCESS) throw std::runtime_error("Failed to start audio device");
         running_=true;
     }
@@ -192,24 +194,56 @@ private:
         if(input) capture_.push(std::span<const std::int16_t>(input,frameCount));
         if(!output) return;
 
-        const auto read=playback_.pop(std::span<std::int16_t>(output,frameCount));
-        if(read<frameCount) std::fill(output+read,output+frameCount,0);
-        if(playbackMuted_.load(std::memory_order_relaxed)) std::fill(output,output+frameCount,0);
+        std::fill(output,output+frameCount,0);
 
-        std::array<std::int16_t,1024> monitorSamples{};
-        std::size_t offset=0;
-        while(offset<frameCount) {
-            const auto count=std::min<std::size_t>(monitorSamples.size(),frameCount-offset);
-            const auto monitorRead=monitor_.pop(std::span<std::int16_t>(monitorSamples.data(),count));
-            for(std::size_t i=0;i<monitorRead;++i) {
-                const auto mixed=static_cast<std::int32_t>(output[offset+i])+static_cast<std::int32_t>(monitorSamples[i]);
-                output[offset+i]=static_cast<std::int16_t>(std::clamp(mixed,-32768,32767));
+        if(!playbackPrimed_ &&
+           playback_.available()>=PlaybackPrebufferSamples) {
+            playbackPrimed_=true;
+        }
+        if(playbackPrimed_) {
+            const auto read=playback_.pop(std::span<std::int16_t>(output,frameCount));
+            if(read<frameCount) {
+                std::fill(output+read,output+frameCount,0);
+                playbackPrimed_=false;
             }
-            offset+=count;
+        }
+
+        if(playbackMuted_.load(std::memory_order_relaxed)) {
+            std::fill(output,output+frameCount,0);
+        }
+
+        if(!monitorPrimed_ &&
+           monitor_.available()>=MonitorPrebufferSamples) {
+            monitorPrimed_=true;
+        }
+
+        if(monitorPrimed_) {
+            std::array<std::int16_t,1024> monitorSamples{};
+            std::size_t offset=0;
+            while(offset<frameCount) {
+                const auto count=std::min<std::size_t>(monitorSamples.size(),frameCount-offset);
+                const auto monitorRead=monitor_.pop(std::span<std::int16_t>(monitorSamples.data(),count));
+                for(std::size_t i=0;i<monitorRead;++i) {
+                    const auto mixed=
+                        static_cast<std::int32_t>(output[offset+i])+
+                        static_cast<std::int32_t>(monitorSamples[i]);
+                    output[offset+i]=static_cast<std::int16_t>(
+                        std::clamp(mixed,-32768,32767));
+                }
+                if(monitorRead<count) {
+                    monitorPrimed_=false;
+                    break;
+                }
+                offset+=count;
+            }
         }
     }
 
     static constexpr std::size_t BufferSamples=AudioEngine::SampleRate*2+1;
+    static constexpr std::size_t PlaybackPrebufferSamples=
+        AudioEngine::SampleRate*60/1000;
+    static constexpr std::size_t MonitorPrebufferSamples=
+        AudioEngine::SampleRate*40/1000;
     SpscRingBuffer<std::int16_t,BufferSamples> capture_;
     SpscRingBuffer<std::int16_t,BufferSamples> playback_;
     SpscRingBuffer<std::int16_t,BufferSamples> monitor_;
@@ -218,6 +252,8 @@ private:
     std::string captureDevice_;
     std::string playbackDevice_;
     std::atomic<bool> playbackMuted_{false};
+    bool playbackPrimed_=false;
+    bool monitorPrimed_=false;
     bool contextInitialized_=false;
     bool deviceInitialized_=false;
     bool running_=false;
