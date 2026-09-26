@@ -1775,6 +1775,7 @@ RoomSnapshot Room() {
 }
 
 ReleaseStatus Release() {
+    EnsureReleaseCheckStarted();
     auto& state=ReleaseState();
     std::lock_guard<std::mutex> lock(state.mutex);
     return state.snapshot;
