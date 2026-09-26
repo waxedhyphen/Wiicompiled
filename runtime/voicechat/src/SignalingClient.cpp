@@ -219,20 +219,55 @@ public:
         sendCommand("RR_ADMIT "+roomInstanceId);
     }
 
-    void admitRetroRewindDevelopment(std::string profileId) {
+    void admitRetroRewindDevelopment(
+        std::string profileId,
+        std::vector<std::string> localProfileIds) {
         profileId.erase(
             std::remove_if(profileId.begin(),profileId.end(),[](unsigned char ch){return std::isspace(ch)!=0;}),
             profileId.end()
         );
 
-        const bool validProfile=
-            !profileId.empty() &&
-            profileId.size()<=10 &&
-            std::all_of(profileId.begin(),profileId.end(),[](unsigned char ch){return std::isdigit(ch)!=0;});
+        const auto validProfile=[](const std::string& value) {
+            return
+                !value.empty() &&
+                value.size()<=10 &&
+                std::all_of(value.begin(),value.end(),[](unsigned char ch){return std::isdigit(ch)!=0;});
+        };
 
-        if(!validProfile) throw std::invalid_argument("Retro Rewind profile ID must be a decimal uint32 value");
+        if(!validProfile(profileId)) {
+            throw std::invalid_argument("Retro Rewind profile ID must be a decimal uint32 value");
+        }
 
-        sendCommand("RR_DEV_ADMIT "+profileId);
+        for(auto& value:localProfileIds) {
+            value.erase(
+                std::remove_if(value.begin(),value.end(),[](unsigned char ch){return std::isspace(ch)!=0;}),
+                value.end());
+        }
+        localProfileIds.erase(
+            std::remove_if(
+                localProfileIds.begin(),
+                localProfileIds.end(),
+                [&](const std::string& value) {
+                    return !validProfile(value);
+                }),
+            localProfileIds.end());
+
+        localProfileIds.push_back(profileId);
+        std::sort(localProfileIds.begin(),localProfileIds.end());
+        localProfileIds.erase(
+            std::unique(localProfileIds.begin(),localProfileIds.end()),
+            localProfileIds.end());
+        if(localProfileIds.size()>12) localProfileIds.resize(12);
+
+        std::string command="RR_DEV_ADMIT "+profileId;
+        if(!localProfileIds.empty()) {
+            command+=" PIDS=";
+            for(std::size_t i=0;i<localProfileIds.size();++i) {
+                if(i>0) command.push_back(',');
+                command+=localProfileIds[i];
+            }
+        }
+        sendCommand(std::move(command));
     }
 
     void debugLookupRetroRewind(std::string profileId) {
@@ -431,7 +466,7 @@ void SignalingClient::sendSignal(std::string signal){impl_->sendSignal(std::move
 void SignalingClient::sendSignal(std::string memberId,std::string signal){impl_->sendSignal(std::move(memberId),std::move(signal));}
 void SignalingClient::authenticateRetroRewind(std::string profileId,std::string sessionKey,std::string gameName){impl_->authenticateRetroRewind(std::move(profileId),std::move(sessionKey),std::move(gameName));}
 void SignalingClient::admitRetroRewindRoom(std::string roomInstanceId){impl_->admitRetroRewindRoom(std::move(roomInstanceId));}
-void SignalingClient::admitRetroRewindDevelopment(std::string profileId){impl_->admitRetroRewindDevelopment(std::move(profileId));}
+void SignalingClient::admitRetroRewindDevelopment(std::string profileId,std::vector<std::string> localProfileIds){impl_->admitRetroRewindDevelopment(std::move(profileId),std::move(localProfileIds));}
 void SignalingClient::debugLookupRetroRewind(std::string profileId){impl_->debugLookupRetroRewind(std::move(profileId));}
 void SignalingClient::setDebugRetroRewindPresence(std::string profileId){impl_->setDebugRetroRewindPresence(std::move(profileId));}
 void SignalingClient::clearDebugRetroRewindPresence(){impl_->clearDebugRetroRewindPresence();}
