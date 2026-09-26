@@ -1429,6 +1429,14 @@ void DrawVoiceChatSettings() {
         muteOptionsPreview=controls.muteNewPlayers
             ? "Mute everyone but friends + new players"
             : "Mute everyone but friends";
+    } else if(controls.muteTeammates) {
+        muteOptionsPreview=controls.muteNewPlayers
+            ? "Mute teammates + new players"
+            : "Mute teammates";
+    } else if(controls.muteEveryoneButTeammates) {
+        muteOptionsPreview=controls.muteNewPlayers
+            ? "Mute everyone but teammates + new players"
+            : "Mute everyone but teammates";
     } else if(controls.muteNewPlayers) {
         muteOptionsPreview="Mute new players joining";
     }
@@ -1440,8 +1448,10 @@ void DrawVoiceChatSettings() {
         if(ImGui::Checkbox("Mute everyone",&muteEveryone)) {
             mkwvc::setEmbeddedVoiceMutePolicy(
                 muteEveryone,
-                muteEveryone ? false : controls.muteOnlyFriends,
-                muteEveryone ? false : controls.muteEveryoneButFriends,
+                false,
+                false,
+                false,
+                false,
                 muteEveryone ? false : controls.muteNewPlayers);
             controls=mkwvc::embeddedVoiceControls();
         }
@@ -1453,7 +1463,9 @@ void DrawVoiceChatSettings() {
             mkwvc::setEmbeddedVoiceMutePolicy(
                 false,
                 muteOnlyFriends,
-                muteOnlyFriends ? false : controls.muteEveryoneButFriends,
+                false,
+                false,
+                false,
                 controls.muteNewPlayers);
             controls=mkwvc::embeddedVoiceControls();
         }
@@ -1462,8 +1474,34 @@ void DrawVoiceChatSettings() {
         if(ImGui::Checkbox("Mute everyone but friends",&muteEveryoneButFriends)) {
             mkwvc::setEmbeddedVoiceMutePolicy(
                 false,
-                muteEveryoneButFriends ? false : controls.muteOnlyFriends,
+                false,
                 muteEveryoneButFriends,
+                false,
+                false,
+                controls.muteNewPlayers);
+            controls=mkwvc::embeddedVoiceControls();
+        }
+
+        bool muteTeammates=controls.muteTeammates;
+        if(ImGui::Checkbox("Mute teammates",&muteTeammates)) {
+            mkwvc::setEmbeddedVoiceMutePolicy(
+                false,
+                false,
+                false,
+                muteTeammates,
+                false,
+                controls.muteNewPlayers);
+            controls=mkwvc::embeddedVoiceControls();
+        }
+
+        bool muteEveryoneButTeammates=controls.muteEveryoneButTeammates;
+        if(ImGui::Checkbox("Mute everyone but teammates",&muteEveryoneButTeammates)) {
+            mkwvc::setEmbeddedVoiceMutePolicy(
+                false,
+                false,
+                false,
+                false,
+                muteEveryoneButTeammates,
                 controls.muteNewPlayers);
             controls=mkwvc::embeddedVoiceControls();
         }
@@ -1474,8 +1512,14 @@ void DrawVoiceChatSettings() {
                 false,
                 controls.muteOnlyFriends,
                 controls.muteEveryoneButFriends,
+                controls.muteTeammates,
+                controls.muteEveryoneButTeammates,
                 muteNewPlayers);
             controls=mkwvc::embeddedVoiceControls();
+        }
+
+        if(!controls.teamModeActive) {
+            ImGui::TextDisabled("Team mute options activate automatically in team modes.");
         }
 
         ImGui::EndDisabled();

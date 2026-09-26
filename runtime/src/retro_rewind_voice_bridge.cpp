@@ -17,6 +17,7 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -224,10 +225,42 @@ constexpr std::uint32_t kControllerMatchInfo = 0x38u;
 constexpr std::uint32_t kMatchInfoSize = 0x58u;
 constexpr std::uint32_t kControllerRoomType = 0xE8u;
 constexpr std::uint32_t kControllerCurrentMatchInfo = 0x291Cu;
+constexpr std::uint32_t kControllerSplitToSend = 0xF0u;
+constexpr std::uint32_t kControllerSplitReceived = 0x150u;
+constexpr std::uint32_t kControllerLastSendBufferUsed = 0x276Cu;
+constexpr std::uint32_t kControllerLastReceivedBufferUsed = 0x279Cu;
+constexpr std::uint32_t kControllerPlayerAidMap = 0x2920u;
 constexpr std::uint32_t kMatchConnectedConsoles = 0x08u;
 constexpr std::uint32_t kMatchFullAidBitmap = 0x10u;
+constexpr std::uint32_t kMatchGroupId = 0x18u;
 constexpr std::uint32_t kMatchLocalAid = 0x21u;
+constexpr std::uint32_t kMatchHostAid = 0x22u;
 constexpr std::uint32_t kRoomTypeNone = 0u;
+constexpr std::uint32_t kRoomSectionIndex = 3u;
+constexpr std::uint32_t kPacketHolderPacket = 0x0u;
+constexpr std::uint32_t kPacketHolderSize = 0x8u;
+constexpr std::uint32_t kPulRoomHostSystemContext = 0x4u;
+constexpr std::uint32_t kPulRoomExtendedTeams = 0x15u;
+constexpr std::uint32_t kPulRoomTeamBytes = 6u;
+constexpr std::uint32_t kPulRoomMinimumTeamSize = kPulRoomExtendedTeams + kPulRoomTeamBytes;
+constexpr std::uint8_t kExtendedTeamUpdateMessage = 0x82u;
+constexpr std::uint32_t kExtendedTeamsContextBit = 20u;
+constexpr std::uint32_t kRacedataInstance = 0x809BD728u;
+constexpr std::uint32_t kRacedataRacesScenario = 0x20u;
+constexpr std::uint32_t kRacedataMenusScenario = 0xC10u;
+constexpr std::uint32_t kScenarioPlayerCount = 0x4u;
+constexpr std::uint32_t kScenarioPlayers = 0x8u;
+constexpr std::uint32_t kScenarioSettings = 0xB48u;
+constexpr std::uint32_t kSettingsModeFlags = 0x28u;
+constexpr std::uint32_t kPlayerSize = 0xF0u;
+constexpr std::uint32_t kPlayerTeam = 0xCCu;
+constexpr std::uint32_t kTeamsEnabledFlag = 0x2u;
+constexpr std::uint32_t kDwcMatchControlInstance = 0x8038630Cu;
+constexpr std::uint32_t kDwcMatchNodes = 0x38u;
+constexpr std::uint32_t kDwcNodeSize = 0x30u;
+constexpr std::uint32_t kDwcNodePid = 0x0u;
+constexpr std::uint32_t kDwcNodeAid = 0x16u;
+constexpr std::uint32_t kDwcNodeCount = 32u;
 
 bool IsLocalRkNetRoomActive() noexcept {
     try {
@@ -275,6 +308,323 @@ bool IsLocalRkNetRoomActive() noexcept {
     } catch (...) {
         return false;
     }
+}
+
+
+struct RkNetRoomState {
+    std::uint32_t controller = 0;
+    std::uint32_t match = 0;
+    std::uint32_t availableAids = 0;
+    std::uint32_t groupId = 0;
+    std::uint8_t localAid = 0xFF;
+    std::uint8_t hostAid = 0xFF;
+};
+
+struct TeamMembershipSnapshot {
+    bool active = false;
+    std::vector<std::string> knownProfileIds;
+    std::vector<std::string> teammateProfileIds;
+};
+
+struct TeamRuntimeCache {
+    std::uint64_t identityGeneration = UINT64_MAX;
+    std::uint32_t groupId = 0;
+    bool extendedActive = false;
+    std::array<std::uint8_t, 12> extendedTeams{};
+
+    TeamRuntimeCache() {
+        extendedTeams.fill(0xFF);
+    }
+};
+
+TeamRuntimeCache& TeamCache() {
+    static TeamRuntimeCache cache;
+    return cache;
+}
+
+bool ReadRkNetRoomState(RkNetRoomState& result) noexcept {
+    try {
+        if (!Memory::Contains(kRkNetControllerInstance, 4)) return false;
+        result.controller = Memory::Read32(kRkNetControllerInstance);
+        if (result.controller == 0 ||
+            !Memory::Contains(result.controller, kControllerPlayerAidMap + 12)) return false;
+
+        const std::uint32_t current =
+            Memory::Read32(result.controller + kControllerCurrentMatchInfo);
+        if (current > 1) return false;
+
+        result.match =
+            result.controller + kControllerMatchInfo + current * kMatchInfoSize;
+        if (!Memory::Contains(result.match, kMatchInfoSize)) return false;
+
+        result.availableAids=Memory::Read32(result.match+kMatchFullAidBitmap);
+        result.groupId=Memory::Read32(result.match+kMatchGroupId);
+        result.localAid=Memory::Read8(result.match+kMatchLocalAid);
+        result.hostAid=Memory::Read8(result.match+kMatchHostAid);
+        return result.localAid < 12 && result.hostAid < 12;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool ReadRoomSectionPacket(const RkNetRoomState& room,
+                           std::uint8_t aid,
+                           bool received,
+                           std::uint32_t& packet,
+                           std::uint32_t& size) noexcept {
+    try {
+        if (aid >= 12) return false;
+
+        std::uint32_t buffer = 0;
+        std::uint32_t splitSlot = 0;
+        if (received) {
+            const std::uint32_t index=aid*8u+kRoomSectionIndex;
+            buffer=Memory::Read32(
+                room.controller+kControllerLastReceivedBufferUsed+index*4u);
+            if (buffer > 1) return false;
+            splitSlot=
+                room.controller+kControllerSplitReceived+
+                (buffer*12u+aid)*4u;
+        } else {
+            buffer=Memory::Read32(
+                room.controller+kControllerLastSendBufferUsed+aid*4u);
+            if (buffer > 1) return false;
+            splitSlot=
+                room.controller+kControllerSplitToSend+
+                (buffer*12u+aid)*4u;
+        }
+
+        if (!Memory::Contains(splitSlot,4)) return false;
+        const std::uint32_t split=Memory::Read32(splitSlot);
+        if (split==0 ||
+            !Memory::Contains(split+kRoomSectionIndex*4u,4)) return false;
+
+        const std::uint32_t holder=
+            Memory::Read32(split+kRoomSectionIndex*4u);
+        if (holder==0 || !Memory::Contains(holder,12)) return false;
+
+        packet=Memory::Read32(holder+kPacketHolderPacket);
+        size=Memory::Read32(holder+kPacketHolderSize);
+        return packet!=0 &&
+               size>=4 &&
+               size<=0x200 &&
+               Memory::Contains(packet,size);
+    } catch (...) {
+        return false;
+    }
+}
+
+bool ReadCurrentTeamRoomPacket(const RkNetRoomState& room,
+                               std::uint32_t& packet,
+                               std::uint32_t& size) noexcept {
+    if (room.localAid != room.hostAid) {
+        return ReadRoomSectionPacket(room,room.hostAid,true,packet,size);
+    }
+
+    for (std::uint8_t aid=0;aid<12;++aid) {
+        if (aid==room.localAid ||
+            (room.availableAids&(1u<<aid))==0) continue;
+        if (ReadRoomSectionPacket(room,aid,false,packet,size)) return true;
+    }
+    return false;
+}
+
+void ResetTeamCache(TeamRuntimeCache& cache,
+                    std::uint64_t identityGeneration,
+                    std::uint32_t groupId) {
+    cache.identityGeneration=identityGeneration;
+    cache.groupId=groupId;
+    cache.extendedActive=false;
+    cache.extendedTeams.fill(0xFF);
+}
+
+void ReadExtendedTeamsFromPacket(
+    std::uint32_t packet,
+    std::array<std::uint8_t,12>& teams) {
+    for (std::uint32_t i=0;i<12;++i) {
+        const std::uint8_t packed=
+            Memory::Read8(packet+kPulRoomExtendedTeams+i/2u);
+        const std::uint8_t team=
+            static_cast<std::uint8_t>(
+                (packed>>((i%2u)*4u))&0x0Fu);
+        teams[i]=team<6 ? team : 0xFF;
+    }
+}
+
+void ObserveExtendedTeams(const RkNetRoomState& room,
+                          TeamRuntimeCache& cache) noexcept {
+    try {
+        std::uint32_t packet=0;
+        std::uint32_t size=0;
+        if (!ReadCurrentTeamRoomPacket(room,packet,size)) return;
+
+        const std::uint8_t messageType=Memory::Read8(packet);
+        if (messageType==kExtendedTeamUpdateMessage &&
+            size>=kPulRoomMinimumTeamSize) {
+            cache.extendedActive=true;
+            ReadExtendedTeamsFromPacket(packet,cache.extendedTeams);
+            return;
+        }
+
+        if (messageType!=1 || size<kPulRoomMinimumTeamSize) return;
+
+        const std::uint64_t hostContext=
+            Memory::Read64(packet+kPulRoomHostSystemContext);
+        cache.extendedActive=
+            (hostContext&(1ull<<kExtendedTeamsContextBit))!=0;
+        if (!cache.extendedActive) {
+            cache.extendedTeams.fill(0xFF);
+            return;
+        }
+
+        const std::uint16_t message=
+            static_cast<std::uint16_t>(
+                (static_cast<std::uint16_t>(
+                    Memory::Read8(packet+1))<<8u) |
+                Memory::Read8(packet+2));
+        if (message==0 || message==2 || message==3) {
+            ReadExtendedTeamsFromPacket(packet,cache.extendedTeams);
+        }
+    } catch (...) {
+    }
+}
+
+bool ReadVanillaTeams(
+    std::array<std::uint8_t,12>& teams) noexcept {
+    try {
+        if (!Memory::Contains(kRacedataInstance,4)) return false;
+        const std::uint32_t racedata=Memory::Read32(kRacedataInstance);
+        if (racedata==0) return false;
+
+        const std::array<std::uint32_t,2> scenarios={
+            racedata+kRacedataRacesScenario,
+            racedata+kRacedataMenusScenario,
+        };
+
+        for (const std::uint32_t scenario:scenarios) {
+            if (!Memory::Contains(
+                    scenario,
+                    kScenarioSettings+kSettingsModeFlags+4)) continue;
+
+            const std::uint32_t modeFlags=
+                Memory::Read32(
+                    scenario+kScenarioSettings+kSettingsModeFlags);
+            if ((modeFlags&kTeamsEnabledFlag)==0) continue;
+
+            const std::uint8_t playerCount=
+                Memory::Read8(scenario+kScenarioPlayerCount);
+            if (playerCount==0 || playerCount>12) continue;
+
+            teams.fill(0xFF);
+            bool any=false;
+            for (std::uint32_t i=0;i<playerCount;++i) {
+                const std::uint32_t team=
+                    Memory::Read32(
+                        scenario+kScenarioPlayers+i*kPlayerSize+kPlayerTeam);
+                if (team<2) {
+                    teams[i]=static_cast<std::uint8_t>(team);
+                    any=true;
+                }
+            }
+            if (any) return true;
+        }
+    } catch (...) {
+    }
+
+    teams.fill(0xFF);
+    return false;
+}
+
+TeamMembershipSnapshot ReadTeamMembership(
+    std::uint64_t identityGeneration,
+    bool localRoomActive) noexcept {
+    TeamMembershipSnapshot result;
+    auto& cache=TeamCache();
+    if (!localRoomActive) {
+        ResetTeamCache(cache,identityGeneration,0);
+        return result;
+    }
+
+    RkNetRoomState room;
+    if (!ReadRkNetRoomState(room)) return result;
+
+    if (cache.identityGeneration!=identityGeneration ||
+        cache.groupId!=room.groupId) {
+        ResetTeamCache(cache,identityGeneration,room.groupId);
+    }
+
+    ObserveExtendedTeams(room,cache);
+
+    std::array<std::uint8_t,12> teams=cache.extendedTeams;
+    if (cache.extendedActive) {
+        result.active=true;
+    } else if (ReadVanillaTeams(teams)) {
+        result.active=true;
+    }
+    if (!result.active) return result;
+
+    std::array<bool,6> localTeams{};
+    std::array<bool,12> aidKnown{};
+    std::array<bool,12> aidTeammate{};
+    std::array<std::uint8_t,12> playerAids{};
+    playerAids.fill(0xFF);
+
+    for (std::uint32_t player=0;player<12;++player) {
+        const std::uint8_t team=teams[player];
+        if (team>=localTeams.size()) continue;
+        const std::uint8_t aid=
+            Memory::Read8(
+                room.controller+kControllerPlayerAidMap+player);
+        playerAids[player]=aid;
+        if (aid>=12) continue;
+        aidKnown[aid]=true;
+        if (aid==room.localAid) localTeams[team]=true;
+    }
+
+    bool localTeamKnown=false;
+    for (const bool present:localTeams) {
+        localTeamKnown=localTeamKnown || present;
+    }
+    if (!localTeamKnown) return result;
+
+    for (std::uint32_t player=0;player<12;++player) {
+        const std::uint8_t team=teams[player];
+        const std::uint8_t aid=playerAids[player];
+        if (team<localTeams.size() &&
+            aid<12 &&
+            localTeams[team]) aidTeammate[aid]=true;
+    }
+
+    if (!Memory::Contains(kDwcMatchControlInstance,4)) return result;
+    const std::uint32_t matchControl=
+        Memory::Read32(kDwcMatchControlInstance);
+    if (matchControl==0 ||
+        !Memory::Contains(
+            matchControl+kDwcMatchNodes,
+            kDwcNodeSize*kDwcNodeCount)) return result;
+
+    std::unordered_set<std::string> known;
+    std::unordered_set<std::string> teammates;
+    for (std::uint32_t i=0;i<kDwcNodeCount;++i) {
+        const std::uint32_t node=
+            matchControl+kDwcMatchNodes+i*kDwcNodeSize;
+        const std::uint32_t pid=
+            Memory::Read32(node+kDwcNodePid);
+        const std::uint8_t aid=
+            Memory::Read8(node+kDwcNodeAid);
+        if (pid==0 ||
+            aid>=12 ||
+            (room.availableAids&(1u<<aid))==0 ||
+            !aidKnown[aid]) continue;
+
+        const std::string profileId=std::to_string(pid);
+        known.insert(profileId);
+        if (aidTeammate[aid]) teammates.insert(profileId);
+    }
+
+    result.knownProfileIds.assign(known.begin(),known.end());
+    result.teammateProfileIds.assign(teammates.begin(),teammates.end());
+    return result;
 }
 
 std::vector<std::string> ReadFriendProfileIds() noexcept {
@@ -1030,12 +1380,18 @@ void ServiceRoomLookup() noexcept {
             !identity.profileId.empty() &&
             IsLocalRkNetRoomActive();
 
+        const TeamMembershipSnapshot teams=
+            ReadTeamMembership(identity.generation,localRoomActive);
+
         mkwvc::EmbeddedVoiceSessionInput voiceInput;
         voiceInput.localRoomActive=localRoomActive;
         voiceInput.profileId=identity.profileId;
         voiceInput.sessionKey=identity.sessionKey;
         voiceInput.gameName=identity.gameName;
         voiceInput.friendProfileIds=ReadFriendProfileIds();
+        voiceInput.teamModeActive=teams.active;
+        voiceInput.teamProfileIds=teams.knownProfileIds;
+        voiceInput.teammateProfileIds=teams.teammateProfileIds;
         voiceInput.identityGeneration=identity.generation;
         mkwvc::serviceEmbeddedVoiceSession(voiceInput);
     } catch(...) {

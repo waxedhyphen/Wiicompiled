@@ -97,7 +97,10 @@ struct EmbeddedVoiceSessionState {
     bool muteEveryone=false;
     bool muteOnlyFriends=false;
     bool muteEveryoneButFriends=false;
+    bool muteTeammates=false;
+    bool muteEveryoneButTeammates=false;
     bool muteNewPlayers=false;
+    bool teamModeActive=false;
     bool microphoneMuted=false;
     bool deafened=false;
     bool pushToTalk=false;
@@ -119,6 +122,8 @@ struct EmbeddedVoiceSessionState {
     std::unordered_map<std::string,float> savedPeerVolumes;
     std::unordered_map<std::string,std::unique_ptr<EmbeddedPeerLink>> peerLinks;
     std::unordered_set<std::string> friendProfileIds;
+    std::unordered_set<std::string> teamProfileIds;
+    std::unordered_set<std::string> teammateProfileIds;
     std::unordered_set<std::string> autoMutedNewParticipants;
     bool settingsLoaded=false;
     std::uint64_t identityGeneration = 0;
@@ -180,6 +185,8 @@ void loadSettingsLocked(EmbeddedVoiceSessionState& state) {
             if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","mute_everyone")) state.muteEveryone=*value;
             if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","mute_only_friends")) state.muteOnlyFriends=*value;
             if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","mute_everyone_but_friends")) state.muteEveryoneButFriends=*value;
+            if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","mute_teammates")) state.muteTeammates=*value;
+            if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","mute_everyone_but_teammates")) state.muteEveryoneButTeammates=*value;
             if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","mute_new_players")) state.muteNewPlayers=*value;
             if(const auto value=RuntimeConfigFile::FindConfigValue<std::string>(document,"voicechat","input_device")) state.inputDevice=*value;
             if(const auto value=RuntimeConfigFile::FindConfigValue<std::string>(document,"voicechat","output_device")) state.outputDevice=*value;
@@ -226,9 +233,18 @@ void loadSettingsLocked(EmbeddedVoiceSessionState& state) {
         if(state.muteEveryone) {
             state.muteOnlyFriends=false;
             state.muteEveryoneButFriends=false;
+            state.muteTeammates=false;
+            state.muteEveryoneButTeammates=false;
             state.muteNewPlayers=false;
-        } else if(state.muteOnlyFriends && state.muteEveryoneButFriends) {
+        } else if(state.muteOnlyFriends) {
             state.muteEveryoneButFriends=false;
+            state.muteTeammates=false;
+            state.muteEveryoneButTeammates=false;
+        } else if(state.muteEveryoneButFriends) {
+            state.muteTeammates=false;
+            state.muteEveryoneButTeammates=false;
+        } else if(state.muteTeammates) {
+            state.muteEveryoneButTeammates=false;
         }
 
         if(state.pushToTalk && state.voiceActivation) state.voiceActivation=false;
@@ -288,6 +304,21 @@ bool isFriendProfile(
            state.friendProfileIds.contains(participantId);
 }
 
+bool isKnownTeamProfile(
+    const EmbeddedVoiceSessionState& state,
+    const std::string& participantId) {
+    return state.teamModeActive &&
+           !participantId.empty() &&
+           state.teamProfileIds.contains(participantId);
+}
+
+bool isTeammateProfile(
+    const EmbeddedVoiceSessionState& state,
+    const std::string& participantId) {
+    return isKnownTeamProfile(state,participantId) &&
+           state.teammateProfileIds.contains(participantId);
+}
+
 float manualVolumeFor(
     const EmbeddedVoiceSessionState& state,
     const std::string& participantId) {
@@ -302,9 +333,13 @@ bool policyMutedFor(
     const EmbeddedVoiceSessionState& state,
     const std::string& participantId) {
     const bool isFriend=isFriendProfile(state,participantId);
+    const bool teamKnown=isKnownTeamProfile(state,participantId);
+    const bool isTeammate=teamKnown && isTeammateProfile(state,participantId);
     if(state.muteEveryone) return true;
     if(state.muteOnlyFriends && isFriend) return true;
     if(state.muteEveryoneButFriends && !isFriend) return true;
+    if(state.muteTeammates && isTeammate) return true;
+    if(state.muteEveryoneButTeammates && teamKnown && !isTeammate) return true;
     if(state.autoMutedNewParticipants.contains(participantId)) return true;
     return false;
 }
@@ -765,10 +800,35 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
         for(const auto& profileId:input.friendProfileIds) {
             if(!profileId.empty()) incomingFriends.insert(profileId);
         }
+        bool policyInputsChanged=false;
         if(incomingFriends!=state.friendProfileIds) {
             state.friendProfileIds=std::move(incomingFriends);
-            applyAllRemoteVolumes(state);
+            policyInputsChanged=true;
         }
+
+        std::unordered_set<std::string> incomingTeamProfiles;
+        std::unordered_set<std::string> incomingTeammates;
+        if(input.teamModeActive) {
+            incomingTeamProfiles.reserve(input.teamProfileIds.size());
+            for(const auto& profileId:input.teamProfileIds) {
+                if(!profileId.empty()) incomingTeamProfiles.insert(profileId);
+            }
+            incomingTeammates.reserve(input.teammateProfileIds.size());
+            for(const auto& profileId:input.teammateProfileIds) {
+                if(!profileId.empty() && incomingTeamProfiles.contains(profileId)) {
+                    incomingTeammates.insert(profileId);
+                }
+            }
+        }
+        if(state.teamModeActive!=input.teamModeActive ||
+           state.teamProfileIds!=incomingTeamProfiles ||
+           state.teammateProfileIds!=incomingTeammates) {
+            state.teamModeActive=input.teamModeActive;
+            state.teamProfileIds=std::move(incomingTeamProfiles);
+            state.teammateProfileIds=std::move(incomingTeammates);
+            policyInputsChanged=true;
+        }
+        if(policyInputsChanged) applyAllRemoteVolumes(state);
 
         if(!state.enabled) {
             if(state.signaling || state.voiceClient || state.microphoneTestRuntime || state.status.lifecycleActive) {
@@ -1071,7 +1131,10 @@ EmbeddedVoiceControls embeddedVoiceControls() {
     controls.muteEveryone=state.muteEveryone;
     controls.muteOnlyFriends=state.muteOnlyFriends;
     controls.muteEveryoneButFriends=state.muteEveryoneButFriends;
+    controls.muteTeammates=state.muteTeammates;
+    controls.muteEveryoneButTeammates=state.muteEveryoneButTeammates;
     controls.muteNewPlayers=state.muteNewPlayers;
+    controls.teamModeActive=state.teamModeActive;
     controls.inputDevices=state.inputDevices;
     controls.outputDevices=state.outputDevices;
     controls.inputDevice=state.inputDevice;
@@ -1117,6 +1180,7 @@ EmbeddedVoiceControls embeddedVoiceControls() {
             if(!control.participantId.empty()) {
                 control.volume=manualVolumeFor(state,control.participantId);
                 control.isFriend=isFriendProfile(state,control.participantId);
+                control.isTeammate=isTeammateProfile(state,control.participantId);
                 control.policyMuted=policyMutedFor(state,control.participantId);
             } else {
                 control.volume=peer.volume;
@@ -1210,6 +1274,8 @@ void setEmbeddedVoiceMutePolicy(
     bool muteEveryone,
     bool muteOnlyFriends,
     bool muteEveryoneButFriends,
+    bool muteTeammates,
+    bool muteEveryoneButTeammates,
     bool muteNewPlayers) {
     auto& state=voiceSessionState();
     std::lock_guard<std::mutex> lock(state.mutex);
@@ -1218,14 +1284,25 @@ void setEmbeddedVoiceMutePolicy(
     if(muteEveryone) {
         muteOnlyFriends=false;
         muteEveryoneButFriends=false;
+        muteTeammates=false;
+        muteEveryoneButTeammates=false;
         muteNewPlayers=false;
-    } else if(muteOnlyFriends && muteEveryoneButFriends) {
+    } else if(muteOnlyFriends) {
         muteEveryoneButFriends=false;
+        muteTeammates=false;
+        muteEveryoneButTeammates=false;
+    } else if(muteEveryoneButFriends) {
+        muteTeammates=false;
+        muteEveryoneButTeammates=false;
+    } else if(muteTeammates) {
+        muteEveryoneButTeammates=false;
     }
 
     state.muteEveryone=muteEveryone;
     state.muteOnlyFriends=muteOnlyFriends;
     state.muteEveryoneButFriends=muteEveryoneButFriends;
+    state.muteTeammates=muteTeammates;
+    state.muteEveryoneButTeammates=muteEveryoneButTeammates;
     state.muteNewPlayers=muteNewPlayers;
     if(!state.muteNewPlayers || state.muteEveryone) {
         state.autoMutedNewParticipants.clear();
@@ -1234,6 +1311,8 @@ void setEmbeddedVoiceMutePolicy(
     persistBool("mute_everyone",state.muteEveryone);
     persistBool("mute_only_friends",state.muteOnlyFriends);
     persistBool("mute_everyone_but_friends",state.muteEveryoneButFriends);
+    persistBool("mute_teammates",state.muteTeammates);
+    persistBool("mute_everyone_but_teammates",state.muteEveryoneButTeammates);
     persistBool("mute_new_players",state.muteNewPlayers);
     applyAllRemoteVolumes(state);
 }

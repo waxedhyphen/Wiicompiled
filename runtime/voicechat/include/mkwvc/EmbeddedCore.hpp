@@ -21,6 +21,9 @@ struct EmbeddedVoiceSessionInput {
     std::string sessionKey;
     std::string gameName;
     std::vector<std::string> friendProfileIds;
+    bool teamModeActive = false;
+    std::vector<std::string> teamProfileIds;
+    std::vector<std::string> teammateProfileIds;
     std::uint64_t identityGeneration = 0;
 };
 
@@ -71,6 +74,7 @@ struct EmbeddedVoicePeerControl {
     std::uint32_t voicePeak = 0;
     bool speaking = false;
     bool isFriend = false;
+    bool isTeammate = false;
     bool policyMuted = false;
     bool remoteMuted = false;
     bool remoteDeafened = false;
@@ -85,7 +89,10 @@ struct EmbeddedVoiceControls {
     bool muteEveryone = false;
     bool muteOnlyFriends = false;
     bool muteEveryoneButFriends = false;
+    bool muteTeammates = false;
+    bool muteEveryoneButTeammates = false;
     bool muteNewPlayers = false;
+    bool teamModeActive = false;
     std::vector<std::string> inputDevices;
     std::vector<std::string> outputDevices;
     std::string inputDevice;
@@ -127,7 +134,7 @@ EmbeddedVoiceControls embeddedVoiceControls();
 void setEmbeddedVoiceEnabled(bool enabled);
 void setEmbeddedVoiceOverlayVisible(bool visible);
 void setEmbeddedVoiceOverlayOptions(bool localStatusVisible,bool playerSpeakersVisible,float playerSpeakerBackgroundTransparency);
-void setEmbeddedVoiceMutePolicy(bool muteEveryone,bool muteOnlyFriends,bool muteEveryoneButFriends,bool muteNewPlayers);
+void setEmbeddedVoiceMutePolicy(bool muteEveryone,bool muteOnlyFriends,bool muteEveryoneButFriends,bool muteTeammates,bool muteEveryoneButTeammates,bool muteNewPlayers);
 void refreshEmbeddedVoiceDevices();
 void setEmbeddedVoiceInputDevice(std::string device);
 void setEmbeddedVoiceOutputDevice(std::string device);
