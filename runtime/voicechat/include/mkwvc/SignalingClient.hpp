@@ -53,7 +53,7 @@ public:
     void sendSignal(std::string memberId,std::string signal);
     void authenticateRetroRewind(std::string profileId,std::string sessionKey,std::string gameName);
     void admitRetroRewindRoom(std::string roomInstanceId);
-    void admitRetroRewindDevelopment(std::string profileId);
+    void admitRetroRewindDevelopment(std::string profileId,std::vector<std::string> localProfileIds={});
     void debugLookupRetroRewind(std::string profileId);
     void setDebugRetroRewindPresence(std::string profileId);
     void clearDebugRetroRewindPresence();
