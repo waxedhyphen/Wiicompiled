@@ -7,17 +7,28 @@
 
 namespace RetroRewindVoiceBridge {
 
-inline constexpr const char* kMkwVoiceChatVersion = "0.14.0";
+inline constexpr const char* kMkwVoiceChatVersion =
+    "0.14.0";
 inline constexpr const char* kMkwVoiceChatPatchRevision =
-    "voice-bridge-v30-rnnoise-stage4j";
-inline constexpr std::uint32_t kMkwVoiceChatProtocolVersion = 1;
+    "voice-bridge-v30-rnnoise-stage4k";
+inline constexpr std::uint32_t kMkwVoiceChatProtocolVersion =
+    1;
+inline constexpr const char* kMkwVoiceChatWiiCompiledVersion =
+    "0.2.32";
 
 struct ReleaseStatus {
     bool checkStarted = false;
     bool checkComplete = false;
+    bool checkSucceeded = false;
     bool updateAvailable = false;
+    bool productUpdateRequired = false;
+    bool integrationUpdateRequired = false;
     bool protocolUpdateRequired = false;
+    bool wiiCompiledUpdateRequired = false;
+    std::uint32_t minimumProtocol = 0;
     std::string latestVersion;
+    std::string latestPatchRevision;
+    std::string requiredWiiCompiledVersion;
     std::string status;
 };
 
