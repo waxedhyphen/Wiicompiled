@@ -1110,7 +1110,9 @@ void DrawVoiceChatOverlay() {
                 ImGui::PushID(peer.memberId.c_str());
                 const ImVec4 speakingBg=peer.speaking
                     ? ImVec4(0.12f,0.48f,0.19f,0.80f)
-                    : ImVec4(0.07f,0.07f,0.07f,0.66f);
+                    : (peer.isFriend
+                        ? ImVec4(0.04f,0.10f,0.24f,0.72f)
+                        : ImVec4(0.07f,0.07f,0.07f,0.66f));
                 ImGui::PushStyleColor(ImGuiCol_ChildBg,speakingBg);
                 ImGui::BeginChild(
                     "##VoicePeerOverlay",
@@ -1130,7 +1132,14 @@ void DrawVoiceChatOverlay() {
 
                 if(peer.speaking) ImGui::TextUnformatted("SPEAKING");
                 else ImGui::TextDisabled("Silent");
-                if(peer.remoteDeafened) {
+                if(peer.isFriend) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("| FRIEND");
+                }
+                if(peer.policyMuted) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("| AUTO MUTED");
+                } else if(peer.remoteDeafened) {
                     ImGui::SameLine();
                     ImGui::TextDisabled("| DEAFENED");
                 } else if(peer.remoteMuted) {
@@ -1224,7 +1233,7 @@ void DrawVoiceChatSettings() {
     };
 
     ImGui::TextUnformatted("Retro Rewind voice integration");
-    ImGui::TextDisabled("Integration: voice-bridge-v21-overlay-audio-stage4c");
+    ImGui::TextDisabled("Integration: voice-bridge-v22-friend-mute-qol-stage4c");
 
     const std::string localName=playerNameFor(identity.profileId);
     const std::string localFriendCode=playerFriendCodeFor(identity.profileId);
@@ -1353,6 +1362,69 @@ void DrawVoiceChatSettings() {
     if(ImGui::Checkbox("Show Voice Chat overlay",&overlayVisible)) {
         mkwvc::setEmbeddedVoiceOverlayVisible(overlayVisible);
         controls=mkwvc::embeddedVoiceControls();
+    }
+
+    std::string muteOptionsPreview="None";
+    if(controls.muteEveryone) {
+        muteOptionsPreview="Mute everyone";
+    } else if(controls.muteOnlyFriends) {
+        muteOptionsPreview=controls.muteNewPlayers
+            ? "Mute friends + new players"
+            : "Mute only friends";
+    } else if(controls.muteEveryoneButFriends) {
+        muteOptionsPreview=controls.muteNewPlayers
+            ? "Mute everyone but friends + new players"
+            : "Mute everyone but friends";
+    } else if(controls.muteNewPlayers) {
+        muteOptionsPreview="Mute new players joining";
+    }
+
+    ImGui::SetNextItemWidth(-1.0f);
+    if(ImGui::BeginCombo("Mute options",muteOptionsPreview.c_str())) {
+        bool muteEveryone=controls.muteEveryone;
+        if(ImGui::Checkbox("Mute everyone",&muteEveryone)) {
+            mkwvc::setEmbeddedVoiceMutePolicy(
+                muteEveryone,
+                muteEveryone ? false : controls.muteOnlyFriends,
+                muteEveryone ? false : controls.muteEveryoneButFriends,
+                muteEveryone ? false : controls.muteNewPlayers);
+            controls=mkwvc::embeddedVoiceControls();
+        }
+
+        ImGui::BeginDisabled(controls.muteEveryone);
+
+        bool muteOnlyFriends=controls.muteOnlyFriends;
+        if(ImGui::Checkbox("Mute only friends",&muteOnlyFriends)) {
+            mkwvc::setEmbeddedVoiceMutePolicy(
+                false,
+                muteOnlyFriends,
+                muteOnlyFriends ? false : controls.muteEveryoneButFriends,
+                controls.muteNewPlayers);
+            controls=mkwvc::embeddedVoiceControls();
+        }
+
+        bool muteEveryoneButFriends=controls.muteEveryoneButFriends;
+        if(ImGui::Checkbox("Mute everyone but friends",&muteEveryoneButFriends)) {
+            mkwvc::setEmbeddedVoiceMutePolicy(
+                false,
+                muteEveryoneButFriends ? false : controls.muteOnlyFriends,
+                muteEveryoneButFriends,
+                controls.muteNewPlayers);
+            controls=mkwvc::embeddedVoiceControls();
+        }
+
+        bool muteNewPlayers=controls.muteNewPlayers;
+        if(ImGui::Checkbox("Mute new players joining",&muteNewPlayers)) {
+            mkwvc::setEmbeddedVoiceMutePolicy(
+                false,
+                controls.muteOnlyFriends,
+                controls.muteEveryoneButFriends,
+                muteNewPlayers);
+            controls=mkwvc::embeddedVoiceControls();
+        }
+
+        ImGui::EndDisabled();
+        ImGui::EndCombo();
     }
 
     if(ImGui::CollapsingHeader("Advanced")) {
@@ -1507,23 +1579,34 @@ void DrawVoiceChatSettings() {
             }
 
             ImGui::TableNextColumn();
-            if(peer.remoteDeafened) ImGui::TextUnformatted("Deafened");
+            if(peer.policyMuted) ImGui::TextDisabled("Auto-muted");
+            else if(peer.remoteDeafened) ImGui::TextUnformatted("Deafened");
             else if(peer.remoteMuted) ImGui::TextUnformatted("Muted");
             else if(peer.speaking) ImGui::TextUnformatted("Speaking");
             else ImGui::TextDisabled("Silent");
 
             ImGui::TableNextColumn();
-            int peerVolume=static_cast<int>(peer.volume*100.0f+0.5f);
+            int peerVolume=peer.policyMuted
+                ? 0
+                : static_cast<int>(peer.volume*100.0f+0.5f);
+            ImGui::BeginDisabled(peer.policyMuted);
             ImGui::SetNextItemWidth(-1.0f);
             if(ImGui::SliderInt("##VoicePeerVolume",&peerVolume,0,300,"%d%%")) {
                 mkwvc::setEmbeddedVoicePeerVolume(peer.memberId,static_cast<float>(peerVolume)/100.0f);
             }
+            ImGui::EndDisabled();
 
             ImGui::TableNextColumn();
-            const bool peerMuted=peer.volume<=0.0f;
-            if(ImGui::Button(peerMuted ? "Unmute" : "Mute",ImVec2(-1.0f,0.0f))) {
-                mkwvc::setEmbeddedVoicePeerVolume(peer.memberId,peerMuted ? 1.0f : 0.0f);
-                controls=mkwvc::embeddedVoiceControls();
+            if(peer.policyMuted) {
+                ImGui::BeginDisabled();
+                ImGui::Button("Auto",ImVec2(-1.0f,0.0f));
+                ImGui::EndDisabled();
+            } else {
+                const bool peerMuted=peer.volume<=0.0f;
+                if(ImGui::Button(peerMuted ? "Unmute" : "Mute",ImVec2(-1.0f,0.0f))) {
+                    mkwvc::setEmbeddedVoicePeerVolume(peer.memberId,peerMuted ? 1.0f : 0.0f);
+                    controls=mkwvc::embeddedVoiceControls();
+                }
             }
             ImGui::PopID();
         }
