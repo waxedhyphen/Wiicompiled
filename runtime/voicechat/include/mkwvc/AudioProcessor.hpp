@@ -11,11 +11,11 @@ namespace mkwvc {
 struct AudioProcessingSettings {
     bool normalization=true;
     bool noiseSuppression=true;
-    int noiseSuppressionStrength=50;
+    int noiseSuppressionStrength=75;
     bool noiseGate=false;
     int noiseGateThreshold=25;
     float microphoneBoost=1.0f;
-    bool compressor=false;
+    bool compressor=true;
     int compressorStrength=50;
 
     bool operator==(const AudioProcessingSettings&) const = default;
