@@ -33,6 +33,12 @@ public:
         return count;
     }
 
+    std::size_t available() const {
+        const auto read=read_.load(std::memory_order_acquire);
+        const auto write=write_.load(std::memory_order_acquire);
+        return write>=read ? write-read : Capacity-(read-write);
+    }
+
 private:
     std::array<T,Capacity> data_{};
     std::atomic<std::size_t> read_{0};
