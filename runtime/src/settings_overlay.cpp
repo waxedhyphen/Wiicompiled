@@ -1082,20 +1082,24 @@ void ServiceVoiceHotkeys() {
 
 void DrawVoiceChatOverlay() {
     auto controls=mkwvc::embeddedVoiceControls();
-    if(!controls.enabled || !controls.overlayVisible) return;
+    if(!controls.enabled ||
+       (!controls.localStatusOverlayVisible &&
+        !controls.playerSpeakersOverlayVisible)) {
+        return;
+    }
 
     const auto session=mkwvc::embeddedVoiceSessionStatus();
     ImGuiViewport* viewport=ImGui::GetMainViewport();
     if(!viewport) return;
 
-    if(!controls.peers.empty()) {
+    if(controls.playerSpeakersOverlayVisible && !controls.peers.empty()) {
         ImGui::SetNextWindowPos(
             ImVec2(
                 viewport->WorkPos.x+viewport->WorkSize.x-12.0f,
                 viewport->WorkPos.y+viewport->WorkSize.y*0.5f),
             ImGuiCond_Always,
             ImVec2(1.0f,0.5f));
-        ImGui::SetNextWindowBgAlpha(0.28f);
+        ImGui::SetNextWindowBgAlpha(0.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(5.0f,5.0f));
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ImVec2(4.0f,3.0f));
         const ImGuiWindowFlags flags=
@@ -1106,13 +1110,17 @@ void DrawVoiceChatOverlay() {
             ImGuiWindowFlags_NoNav|
             ImGuiWindowFlags_NoInputs;
         if(ImGui::Begin("##VoiceChatParticipants",nullptr,flags)) {
+            const float backgroundAlpha=std::clamp(
+                1.0f-controls.playerSpeakerBackgroundTransparency,
+                0.05f,
+                1.0f);
             for(const auto& peer:controls.peers) {
                 ImGui::PushID(peer.memberId.c_str());
                 const ImVec4 speakingBg=peer.speaking
-                    ? ImVec4(0.12f,0.48f,0.19f,0.80f)
+                    ? ImVec4(0.12f,0.48f,0.19f,backgroundAlpha)
                     : (peer.isFriend
-                        ? ImVec4(0.04f,0.10f,0.24f,0.72f)
-                        : ImVec4(0.07f,0.07f,0.07f,0.66f));
+                        ? ImVec4(0.04f,0.10f,0.24f,backgroundAlpha)
+                        : ImVec4(0.07f,0.07f,0.07f,backgroundAlpha));
                 ImGui::PushStyleColor(ImGuiCol_ChildBg,speakingBg);
                 ImGui::BeginChild(
                     "##VoicePeerOverlay",
@@ -1156,6 +1164,8 @@ void DrawVoiceChatOverlay() {
         ImGui::End();
         ImGui::PopStyleVar(2);
     }
+
+    if(!controls.localStatusOverlayVisible) return;
 
     std::string status;
     if(controls.deafened) status="DEAFENED";
@@ -1233,7 +1243,7 @@ void DrawVoiceChatSettings() {
     };
 
     ImGui::TextUnformatted("Retro Rewind voice integration");
-    ImGui::TextDisabled("Integration: voice-bridge-v22-friend-mute-qol-stage4c");
+    ImGui::TextDisabled("Integration: voice-bridge-v23-overlay-buffer-audio-stage4c");
 
     const std::string localName=playerNameFor(identity.profileId);
     const std::string localFriendCode=playerFriendCodeFor(identity.profileId);
@@ -1358,10 +1368,54 @@ void DrawVoiceChatSettings() {
         ImVec2(-1.0f,20.0f),
         controls.localSpeaking ? "Speaking" : "");
 
-    bool overlayVisible=controls.overlayVisible;
-    if(ImGui::Checkbox("Show Voice Chat overlay",&overlayVisible)) {
-        mkwvc::setEmbeddedVoiceOverlayVisible(overlayVisible);
-        controls=mkwvc::embeddedVoiceControls();
+    std::string overlayOptionsPreview="Off";
+    if(controls.localStatusOverlayVisible && controls.playerSpeakersOverlayVisible) {
+        overlayOptionsPreview="Local status + player speakers";
+    } else if(controls.localStatusOverlayVisible) {
+        overlayOptionsPreview="Local status";
+    } else if(controls.playerSpeakersOverlayVisible) {
+        overlayOptionsPreview="Player speakers";
+    }
+
+    ImGui::TextUnformatted("Overlay options");
+    ImGui::SetNextItemWidth(-1.0f);
+    if(ImGui::BeginCombo("##VoiceOverlayOptions",overlayOptionsPreview.c_str())) {
+        bool localStatusVisible=controls.localStatusOverlayVisible;
+        if(ImGui::Checkbox("Bottom-right local status",&localStatusVisible)) {
+            mkwvc::setEmbeddedVoiceOverlayOptions(
+                localStatusVisible,
+                controls.playerSpeakersOverlayVisible,
+                controls.playerSpeakerBackgroundTransparency);
+            controls=mkwvc::embeddedVoiceControls();
+        }
+
+        bool playerSpeakersVisible=controls.playerSpeakersOverlayVisible;
+        if(ImGui::Checkbox("Right-side player speakers",&playerSpeakersVisible)) {
+            mkwvc::setEmbeddedVoiceOverlayOptions(
+                controls.localStatusOverlayVisible,
+                playerSpeakersVisible,
+                controls.playerSpeakerBackgroundTransparency);
+            controls=mkwvc::embeddedVoiceControls();
+        }
+
+        int backgroundTransparency=static_cast<int>(
+            controls.playerSpeakerBackgroundTransparency*100.0f+0.5f);
+        ImGui::BeginDisabled(!controls.playerSpeakersOverlayVisible);
+        ImGui::SetNextItemWidth(250.0f);
+        if(ImGui::SliderInt(
+               "Player speaker BG transparency",
+               &backgroundTransparency,
+               0,
+               95,
+               "%d%%")) {
+            mkwvc::setEmbeddedVoiceOverlayOptions(
+                controls.localStatusOverlayVisible,
+                controls.playerSpeakersOverlayVisible,
+                static_cast<float>(backgroundTransparency)/100.0f);
+            controls=mkwvc::embeddedVoiceControls();
+        }
+        ImGui::EndDisabled();
+        ImGui::EndCombo();
     }
 
     std::string muteOptionsPreview="None";
@@ -1379,8 +1433,9 @@ void DrawVoiceChatSettings() {
         muteOptionsPreview="Mute new players joining";
     }
 
+    ImGui::TextUnformatted("Mute options");
     ImGui::SetNextItemWidth(-1.0f);
-    if(ImGui::BeginCombo("Mute options",muteOptionsPreview.c_str())) {
+    if(ImGui::BeginCombo("##VoiceMuteOptions",muteOptionsPreview.c_str())) {
         bool muteEveryone=controls.muteEveryone;
         if(ImGui::Checkbox("Mute everyone",&muteEveryone)) {
             mkwvc::setEmbeddedVoiceMutePolicy(
