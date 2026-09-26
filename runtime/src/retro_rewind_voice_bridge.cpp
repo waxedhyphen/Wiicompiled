@@ -217,6 +217,9 @@ bool ShouldObserve(std::uint16_t peerPort) {
 //   full AID bitmap           +0x10
 //   local AID                 +0x21
 constexpr std::uint32_t kRkNetControllerInstance = 0x809C20D8u;
+constexpr std::uint32_t kRkNetFriendMgrInstance = 0x809C2110u;
+constexpr std::uint32_t kFriendMgrFriendPids = 0x36Cu;
+constexpr std::uint32_t kFriendMgrFriendCount = 30u;
 constexpr std::uint32_t kControllerMatchInfo = 0x38u;
 constexpr std::uint32_t kMatchInfoSize = 0x58u;
 constexpr std::uint32_t kControllerRoomType = 0xE8u;
@@ -272,6 +275,42 @@ bool IsLocalRkNetRoomActive() noexcept {
     } catch (...) {
         return false;
     }
+}
+
+std::vector<std::string> ReadFriendProfileIds() noexcept {
+    std::vector<std::string> result;
+    try {
+        if(!RuntimeProduct::IsRetroRewind() ||
+           !Memory::Contains(kRkNetFriendMgrInstance,4)) {
+            return result;
+        }
+
+        const std::uint32_t manager=Memory::Read32(kRkNetFriendMgrInstance);
+        const std::uint32_t bytes=kFriendMgrFriendCount*4u;
+        if(manager==0 ||
+           !Memory::Contains(manager+kFriendMgrFriendPids,bytes)) {
+            return result;
+        }
+
+        result.reserve(kFriendMgrFriendCount);
+        for(std::uint32_t i=0;i<kFriendMgrFriendCount;++i) {
+            const std::uint32_t profileId=
+                Memory::Read32(manager+kFriendMgrFriendPids+i*4u);
+            if(profileId!=0) result.push_back(std::to_string(profileId));
+        }
+    } catch(...) {
+        result.clear();
+    }
+    return result;
+}
+
+bool IsFriendProfileId(
+    const std::vector<std::string>& friendProfileIds,
+    const std::string& profileId) {
+    return std::find(
+        friendProfileIds.begin(),
+        friendProfileIds.end(),
+        profileId)!=friendProfileIds.end();
 }
 
 void ClearLocalRoomSnapshotLocked(RoomLookupState& state,
@@ -996,6 +1035,7 @@ void ServiceRoomLookup() noexcept {
         voiceInput.profileId=identity.profileId;
         voiceInput.sessionKey=identity.sessionKey;
         voiceInput.gameName=identity.gameName;
+        voiceInput.friendProfileIds=ReadFriendProfileIds();
         voiceInput.identityGeneration=identity.generation;
         mkwvc::serviceEmbeddedVoiceSession(voiceInput);
     } catch(...) {
@@ -1005,6 +1045,7 @@ void ServiceRoomLookup() noexcept {
 RoomSnapshot Room() {
     const IdentitySnapshot identity=Snapshot();
     const auto session=mkwvc::embeddedVoiceSessionStatus();
+    const auto friendProfileIds=ReadFriendProfileIds();
 
     RoomSnapshot room;
     room.localRoomActive=
@@ -1039,6 +1080,7 @@ RoomSnapshot Room() {
         player.name=source.displayName;
         player.friendCode=source.friendCode;
         player.voiceChat=source.voiceChat;
+        player.isFriend=IsFriendProfileId(friendProfileIds,source.profileId);
         room.players.push_back(std::move(player));
     }
 
