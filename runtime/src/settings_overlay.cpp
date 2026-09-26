@@ -1255,7 +1255,25 @@ void DrawVoiceChatSettings() {
     };
 
     ImGui::TextUnformatted("Retro Rewind voice integration");
-    ImGui::TextDisabled("Integration: voice-bridge-v30-rnnoise-stage4c");
+    const auto release=RetroRewindVoiceBridge::Release();
+    ImGui::TextDisabled(
+        "MKW Voice Chat %s | Integration: voice-bridge-v30-rnnoise-stage4h",
+        RetroRewindVoiceBridge::kMkwVoiceChatVersion);
+    ImGui::Text(
+        "Update status: %s",
+        release.status.empty() ? "Checking..." : release.status.c_str());
+    if(!release.latestVersion.empty()) {
+        ImGui::TextDisabled(
+            "Latest release: %s",
+            release.latestVersion.c_str());
+    }
+    if(release.updateAvailable || release.protocolUpdateRequired) {
+        if(ImGui::Button("Update MKW Voice Chat")) {
+            RetroRewindVoiceBridge::LaunchInstalledUpdater();
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("Close the game after starting the updater.");
+    }
 
     const std::string localName=playerNameFor(identity.profileId);
     const std::string localFriendCode=playerFriendCodeFor(identity.profileId);
