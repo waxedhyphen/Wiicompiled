@@ -1476,6 +1476,8 @@ RoomSnapshot Room() {
     room.roomId=session.roomId;
     room.roomInstanceId=session.roomInstanceId;
     room.created=session.roomCreated;
+    room.localRoomProfileIds=
+        ReadRoomProfileIds(identity.profileId,room.localRoomActive);
     room.identityGeneration=identity.generation;
     room.players.reserve(session.roomPlayers.size());
 
