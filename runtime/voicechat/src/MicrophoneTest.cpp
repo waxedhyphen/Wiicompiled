@@ -23,22 +23,41 @@ std::uint32_t peakOf(std::span<const std::int16_t> samples) {
     return peak;
 }
 
+constexpr float BaseMicrophoneGain=1.25f;
+constexpr float BasePlaybackGain=1.25f;
+
+float softLimit(float value) {
+    constexpr float knee=30000.0f;
+    constexpr float ceiling=32600.0f;
+    const float magnitude=std::abs(value);
+    if(magnitude<=knee) return value;
+    const float compressed=knee+(ceiling-knee)*(1.0f-std::exp(-(magnitude-knee)/(ceiling-knee)));
+    return std::copysign(compressed,value);
+}
+
 void applyGain(std::span<std::int16_t> samples,float gain,float& limiterGain) {
     gain=std::max(0.0f,gain);
     float peak=0.0f;
     for(const auto sample:samples) peak=std::max(peak,std::abs(static_cast<float>(sample))*gain);
 
-    constexpr float ceiling=31600.0f;
+    constexpr float ceiling=30000.0f;
     const float desired=peak>ceiling ? ceiling/peak : 1.0f;
-    if(desired<limiterGain) limiterGain=desired;
-    else limiterGain+=(desired-limiterGain)*0.06f;
-    limiterGain=std::clamp(limiterGain,0.0f,1.0f);
+    const float previous=limiterGain;
+    const float target=desired<previous
+        ? desired
+        : previous+(desired-previous)*0.04f;
+    const float denominator=samples.size()>1
+        ? static_cast<float>(samples.size()-1)
+        : 1.0f;
 
-    const float totalGain=gain*limiterGain;
-    for(auto& sample:samples) {
-        const auto scaled=static_cast<std::int32_t>(std::lround(static_cast<float>(sample)*totalGain));
-        sample=static_cast<std::int16_t>(std::clamp(scaled,-32768,32767));
+    for(std::size_t i=0;i<samples.size();++i) {
+        const float t=static_cast<float>(i)/denominator;
+        const float smoothGain=previous+(target-previous)*t;
+        const float value=softLimit(static_cast<float>(samples[i])*gain*smoothGain);
+        samples[i]=static_cast<std::int16_t>(std::clamp(
+            static_cast<std::int32_t>(std::lround(value)),-32768,32767));
     }
+    limiterGain=std::clamp(target,0.0f,1.0f);
 }
 
 }
@@ -114,12 +133,18 @@ void MicrophoneTest::loop() {
         }
 
         processor_.processCapture(samples);
-        applyGain(samples,microphoneGain_.load(std::memory_order_relaxed),microphoneLimiterGain);
+        applyGain(
+            samples,
+            microphoneGain_.load(std::memory_order_relaxed)*BaseMicrophoneGain,
+            microphoneLimiterGain);
         micPeak_.store(peakOf(samples),std::memory_order_relaxed);
 
         if(monitorEnabled_.load(std::memory_order_relaxed)) {
             std::copy(samples.begin(),samples.end(),monitor.begin());
-            applyGain(monitor,playbackVolume_.load(std::memory_order_relaxed),monitorLimiterGain);
+            applyGain(
+                monitor,
+                playbackVolume_.load(std::memory_order_relaxed)*BasePlaybackGain,
+                monitorLimiterGain);
             audio_.queueMonitor(monitor);
         }
         filled=0;
