@@ -582,6 +582,24 @@ void clearVoiceSessionLocked(
     clearVoiceNetworkSessionLocked(state,std::move(status));
 }
 
+void resetPeerTransport(
+    EmbeddedVoiceSessionState& state,
+    const std::string& memberId) {
+    if(memberId.empty()) return;
+    if(state.voiceClient && state.voiceClient->hasPeer(memberId)) {
+        state.voiceClient->removePeer(memberId);
+    }
+    state.peerLinks.erase(memberId);
+
+    if(state.voiceClient && state.voiceClient->peerCount()==0) {
+        stopVoiceClient(state);
+    }
+    state.status.voiceClientRunning=state.voiceClient!=nullptr;
+    state.status.peerCount=state.voiceClient
+        ? static_cast<std::uint32_t>(state.voiceClient->peerCount())
+        : 0;
+}
+
 void removePeer(
     EmbeddedVoiceSessionState& state,
     const std::string& memberId) {
@@ -1024,9 +1042,12 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
                        state.status.localMemberId.empty()) {
                         break;
                     }
-                    if(!state.peerLinks.contains(event.memberId) &&
-                       (!state.voiceClient ||
-                        !state.voiceClient->hasPeer(event.memberId))) {
+                    if(state.peerLinks.contains(event.memberId) ||
+                       (state.voiceClient &&
+                        state.voiceClient->hasPeer(event.memberId))) {
+                        resetPeerTransport(state,event.memberId);
+                    }
+                    {
                         const bool offerer=
                             state.status.localMemberId<event.memberId;
                         ensurePeerLink(
