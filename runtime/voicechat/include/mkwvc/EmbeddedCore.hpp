@@ -20,6 +20,7 @@ struct EmbeddedVoiceSessionInput {
     std::string profileId;
     std::string sessionKey;
     std::string gameName;
+    std::vector<std::string> friendProfileIds;
     std::uint64_t identityGeneration = 0;
 };
 
@@ -69,6 +70,8 @@ struct EmbeddedVoicePeerControl {
     float volume = 1.0f;
     std::uint32_t voicePeak = 0;
     bool speaking = false;
+    bool isFriend = false;
+    bool policyMuted = false;
     bool remoteMuted = false;
     bool remoteDeafened = false;
 };
@@ -76,6 +79,10 @@ struct EmbeddedVoicePeerControl {
 struct EmbeddedVoiceControls {
     bool enabled = false;
     bool overlayVisible = true;
+    bool muteEveryone = false;
+    bool muteOnlyFriends = false;
+    bool muteEveryoneButFriends = false;
+    bool muteNewPlayers = false;
     std::vector<std::string> inputDevices;
     std::vector<std::string> outputDevices;
     std::string inputDevice;
@@ -116,6 +123,7 @@ EmbeddedVoiceSessionStatus embeddedVoiceSessionStatus();
 EmbeddedVoiceControls embeddedVoiceControls();
 void setEmbeddedVoiceEnabled(bool enabled);
 void setEmbeddedVoiceOverlayVisible(bool visible);
+void setEmbeddedVoiceMutePolicy(bool muteEveryone,bool muteOnlyFriends,bool muteEveryoneButFriends,bool muteNewPlayers);
 void refreshEmbeddedVoiceDevices();
 void setEmbeddedVoiceInputDevice(std::string device);
 void setEmbeddedVoiceOutputDevice(std::string device);
