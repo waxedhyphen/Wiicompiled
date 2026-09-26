@@ -1621,11 +1621,11 @@ void resetEmbeddedVoiceAudioSettings() {
     persistString("output_device",{});
     persistBool("normalization",true);
     persistBool("noise_suppression",true);
-    persistInt("noise_strength",50);
+    persistInt("noise_strength",75);
     persistBool("noise_gate",false);
     persistInt("noise_gate_threshold",25);
     persistFloat("microphone_boost",1.0f);
-    persistBool("compressor",false);
+    persistBool("compressor",true);
     persistInt("compressor_strength",50);
     persistFloat("microphone_gain",1.0f);
     persistFloat("playback_volume",1.0f);
