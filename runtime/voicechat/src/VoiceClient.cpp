@@ -101,8 +101,8 @@ std::int64_t steadyNowMs() {
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-constexpr float BaseMicrophoneGain=1.25f;
-constexpr float BasePlaybackGain=1.25f;
+constexpr float BaseMicrophoneGain=1.35f;
+constexpr float BasePlaybackGain=1.35f;
 
 float softLimit(float value) {
     constexpr float knee=30000.0f;
