@@ -1096,13 +1096,16 @@ void ReleaseCheckWorker() {
     }
 
     const std::string latest=JsonStringValue(json,"version");
+    const std::string latestPatchRevision=
+        JsonStringValue(json,"patchRevision");
     int schema=0;
     int minimumProtocol=0;
     if(!JsonIntValue(json,"schemaVersion",schema) ||
        schema!=1 ||
        !JsonIntValue(json,"minimumProtocol",minimumProtocol) ||
        minimumProtocol<1 ||
-       latest.empty()) {
+       latest.empty() ||
+       latestPatchRevision.empty()) {
         FinishReleaseCheck(
             true,false,false,{},
             "Update manifest is invalid");
@@ -1117,11 +1120,16 @@ void ReleaseCheckWorker() {
         return;
     }
 
+    const int versionComparison=
+        CompareVersions(latest,kMkwVoiceChatVersion);
     const bool protocolRequired=
         minimumProtocol>
         static_cast<int>(kMkwVoiceChatProtocolVersion);
+    const bool integrationMismatch=
+        versionComparison==0 &&
+        latestPatchRevision!=kMkwVoiceChatPatchRevision;
     const bool updateAvailable=
-        CompareVersions(latest,kMkwVoiceChatVersion)>0;
+        versionComparison>0 || integrationMismatch;
 
     FinishReleaseCheck(
         true,
@@ -1130,9 +1138,11 @@ void ReleaseCheckWorker() {
         latest,
         protocolRequired
             ? "Update required for Voice Chat compatibility"
-            : updateAvailable
-                ? "Update available"
-                : "Current");
+            : integrationMismatch
+                ? "Integration update available"
+                : updateAvailable
+                    ? "Update available"
+                    : "Current");
 }
 
 void EnsureReleaseCheckStarted() {
