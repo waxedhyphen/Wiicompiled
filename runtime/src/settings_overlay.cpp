@@ -1321,7 +1321,9 @@ void DrawVoiceChatSettings() {
         ImGui::PopStyleColor();
 
         if(ImGui::Button("Update MKW Voice Chat")) {
-            RetroRewindVoiceBridge::LaunchInstalledUpdater();
+            if(RetroRewindVoiceBridge::LaunchInstalledUpdater()) {
+                ExitForAuroraWindowClose();
+            }
         }
         return;
     }
