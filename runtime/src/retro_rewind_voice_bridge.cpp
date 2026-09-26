@@ -1906,7 +1906,7 @@ bool LaunchInstalledUpdater() noexcept {
         const auto productSlash=path.find_last_of(L"\\/");
         if(productSlash==std::wstring::npos) return false;
         path.resize(productSlash+1);
-        path+=L"WiiCompiled-VoiceChat-Installer.exe";
+        path+=L"MKWVoiceChat-Updater.exe";
 
         const DWORD attributes=GetFileAttributesW(path.c_str());
         if(attributes==INVALID_FILE_ATTRIBUTES ||
@@ -1914,11 +1914,11 @@ bool LaunchInstalledUpdater() noexcept {
             auto& state=ReleaseState();
             std::lock_guard<std::mutex> lock(state.mutex);
             state.snapshot.status=
-                "Installed updater is missing; reinstall MKW Voice Chat";
+                "Installed bootstrap updater is missing; reinstall MKW Voice Chat";
             return false;
         }
 
-        std::wstring command=L"\""+path+L"\" update --wait-pid "+
+        std::wstring command=L"\""+path+L"\" --wait-pid "+
             std::to_wstring(GetCurrentProcessId());
         std::vector<wchar_t> writable(command.begin(),command.end());
         writable.push_back(L'\0');
