@@ -69,6 +69,101 @@ RoomLookupState& RoomState() {
     return *state;
 }
 
+struct ReleaseCheckState {
+    std::mutex mutex;
+    ReleaseStatus snapshot;
+    bool workerRunning = false;
+};
+
+ReleaseCheckState& ReleaseState() {
+    // Detached background check; retain storage for process lifetime.
+    static ReleaseCheckState* state = new ReleaseCheckState();
+    return *state;
+}
+
+bool ParseVersionTriplet(
+    std::string_view text,
+    std::array<int,3>& result) {
+    result={0,0,0};
+    std::size_t start=0;
+    for(std::size_t index=0;index<3;++index) {
+        const std::size_t end=
+            index==2 ? text.size() : text.find('.',start);
+        if(end==std::string_view::npos || end<=start) return false;
+        const auto part=text.substr(start,end-start);
+        int value=0;
+        const auto parsed=std::from_chars(
+            part.data(),
+            part.data()+part.size(),
+            value);
+        if(parsed.ec!=std::errc{} ||
+           parsed.ptr!=part.data()+part.size() ||
+           value<0) {
+            return false;
+        }
+        result[index]=value;
+        start=end+1;
+    }
+    return start==text.size()+1;
+}
+
+int CompareVersions(
+    std::string_view left,
+    std::string_view right) {
+    std::array<int,3> a{};
+    std::array<int,3> b{};
+    if(!ParseVersionTriplet(left,a) ||
+       !ParseVersionTriplet(right,b)) {
+        return 0;
+    }
+    if(a<b) return -1;
+    if(a>b) return 1;
+    return 0;
+}
+
+std::string JsonStringValue(
+    std::string_view json,
+    std::string_view key) {
+    const std::string marker="\""+std::string(key)+"\"";
+    const std::size_t keyPos=json.find(marker);
+    if(keyPos==std::string_view::npos) return {};
+    const std::size_t colon=json.find(':',keyPos+marker.size());
+    if(colon==std::string_view::npos) return {};
+    const std::size_t quote=json.find('"',colon+1);
+    if(quote==std::string_view::npos) return {};
+    const std::size_t end=json.find('"',quote+1);
+    if(end==std::string_view::npos) return {};
+    return std::string(json.substr(quote+1,end-quote-1));
+}
+
+bool JsonIntValue(
+    std::string_view json,
+    std::string_view key,
+    int& value) {
+    const std::string marker="\""+std::string(key)+"\"";
+    const std::size_t keyPos=json.find(marker);
+    if(keyPos==std::string_view::npos) return false;
+    const std::size_t colon=json.find(':',keyPos+marker.size());
+    if(colon==std::string_view::npos) return false;
+    std::size_t start=colon+1;
+    while(start<json.size() &&
+          std::isspace(static_cast<unsigned char>(json[start]))!=0) {
+        ++start;
+    }
+    std::size_t end=start;
+    while(end<json.size() &&
+          std::isdigit(static_cast<unsigned char>(json[end]))!=0) {
+        ++end;
+    }
+    if(end==start) return false;
+    const auto parsed=std::from_chars(
+        json.data()+start,
+        json.data()+end,
+        value);
+    return parsed.ec==std::errc{} &&
+           parsed.ptr==json.data()+end;
+}
+
 bool IsDecimal(std::string_view value, bool allowNegative = false) {
     if (value.empty()) {
         return false;
@@ -869,6 +964,181 @@ struct WinHttpHandle {
     }
 };
 
+void FinishReleaseCheck(
+    bool complete,
+    bool updateAvailable,
+    bool protocolRequired,
+    std::string latestVersion,
+    std::string status) {
+    auto& state=ReleaseState();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.workerRunning=false;
+    state.snapshot.checkStarted=true;
+    state.snapshot.checkComplete=complete;
+    state.snapshot.updateAvailable=updateAvailable;
+    state.snapshot.protocolUpdateRequired=protocolRequired;
+    state.snapshot.latestVersion=std::move(latestVersion);
+    state.snapshot.status=std::move(status);
+}
+
+void ReleaseCheckWorker() {
+    constexpr wchar_t kHost[]=L"raw.githubusercontent.com";
+    constexpr wchar_t kPath[]=
+        L"/waxedhyphen/MKW-VoiceChat/main/release/mkwvc-release.json";
+
+    WinHttpHandle session(WinHttpOpen(
+        L"MKW VoiceChat release check/0.14",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_NO_PROXY_NAME,
+        WINHTTP_NO_PROXY_BYPASS,
+        0));
+    if(!session.value) {
+        FinishReleaseCheck(
+            true,false,false,{},
+            "Could not check for updates");
+        return;
+    }
+    WinHttpSetTimeouts(session.value,5000,5000,5000,5000);
+
+    WinHttpHandle connection(WinHttpConnect(
+        session.value,
+        kHost,
+        INTERNET_DEFAULT_HTTPS_PORT,
+        0));
+    if(!connection.value) {
+        FinishReleaseCheck(
+            true,false,false,{},
+            "Could not check for updates");
+        return;
+    }
+
+    WinHttpHandle request(WinHttpOpenRequest(
+        connection.value,
+        L"GET",
+        kPath,
+        nullptr,
+        WINHTTP_NO_REFERER,
+        WINHTTP_DEFAULT_ACCEPT_TYPES,
+        WINHTTP_FLAG_SECURE));
+    if(!request.value) {
+        FinishReleaseCheck(
+            true,false,false,{},
+            "Could not check for updates");
+        return;
+    }
+
+    constexpr wchar_t kHeaders[]=
+        L"Cache-Control: no-cache\r\nAccept: application/json\r\n";
+    if(!WinHttpSendRequest(
+            request.value,
+            kHeaders,
+            static_cast<DWORD>(-1L),
+            WINHTTP_NO_REQUEST_DATA,
+            0,
+            0,
+            0) ||
+       !WinHttpReceiveResponse(request.value,nullptr)) {
+        FinishReleaseCheck(
+            true,false,false,{},
+            "Could not check for updates");
+        return;
+    }
+
+    DWORD statusCode=0;
+    DWORD statusSize=sizeof(statusCode);
+    if(!WinHttpQueryHeaders(
+            request.value,
+            WINHTTP_QUERY_STATUS_CODE|WINHTTP_QUERY_FLAG_NUMBER,
+            WINHTTP_HEADER_NAME_BY_INDEX,
+            &statusCode,
+            &statusSize,
+            WINHTTP_NO_HEADER_INDEX) ||
+       statusCode!=200) {
+        FinishReleaseCheck(
+            true,false,false,{},
+            "Could not check for updates");
+        return;
+    }
+
+    std::string json;
+    while(json.size()<32768) {
+        DWORD available=0;
+        if(!WinHttpQueryDataAvailable(request.value,&available)) break;
+        if(available==0) break;
+        const DWORD chunk=
+            static_cast<DWORD>(
+                std::min<std::size_t>(
+                    available,
+                    32768-json.size()));
+        std::string buffer(chunk,'\0');
+        DWORD read=0;
+        if(!WinHttpReadData(
+                request.value,
+                buffer.data(),
+                chunk,
+                &read)) {
+            break;
+        }
+        buffer.resize(read);
+        json+=buffer;
+        if(read==0) break;
+    }
+
+    const std::string latest=JsonStringValue(json,"version");
+    int schema=0;
+    int minimumProtocol=0;
+    if(!JsonIntValue(json,"schemaVersion",schema) ||
+       schema!=1 ||
+       !JsonIntValue(json,"minimumProtocol",minimumProtocol) ||
+       minimumProtocol<1 ||
+       latest.empty()) {
+        FinishReleaseCheck(
+            true,false,false,{},
+            "Update manifest is invalid");
+        return;
+    }
+
+    std::array<int,3> parsed{};
+    if(!ParseVersionTriplet(latest,parsed)) {
+        FinishReleaseCheck(
+            true,false,false,{},
+            "Update manifest has invalid version");
+        return;
+    }
+
+    const bool protocolRequired=
+        minimumProtocol>
+        static_cast<int>(kMkwVoiceChatProtocolVersion);
+    const bool updateAvailable=
+        CompareVersions(latest,kMkwVoiceChatVersion)>0;
+
+    FinishReleaseCheck(
+        true,
+        updateAvailable||protocolRequired,
+        protocolRequired,
+        latest,
+        protocolRequired
+            ? "Update required for Voice Chat compatibility"
+            : updateAvailable
+                ? "Update available"
+                : "Current");
+}
+
+void EnsureReleaseCheckStarted() {
+    auto& state=ReleaseState();
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        if(state.snapshot.checkStarted || state.workerRunning) return;
+        state.snapshot.checkStarted=true;
+        state.snapshot.status="Checking for updates...";
+        state.workerRunning=true;
+    }
+
+    std::thread([] {
+        ReleaseCheckWorker();
+    }).detach();
+}
+
 DWORD SendWebSocketText(HINTERNET socket, const std::string& message) {
     return WinHttpWebSocketSend(
         socket,
@@ -1322,6 +1592,15 @@ void PersistentRoomWorker(std::string profileId, std::uint64_t generation) {
 
 #else
 
+void EnsureReleaseCheckStarted() {
+    auto& state=ReleaseState();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if(state.snapshot.checkStarted) return;
+    state.snapshot.checkStarted=true;
+    state.snapshot.checkComplete=true;
+    state.snapshot.status="Update check unavailable on this platform";
+}
+
 constexpr auto kRoomReconnectDelay = std::chrono::seconds(5);
 
 void FinishRoomWorker(std::uint64_t generation, std::string status,
@@ -1421,6 +1700,7 @@ IdentitySnapshot Snapshot() {
 
 void ServiceRoomLookup() noexcept {
     try {
+        EnsureReleaseCheckStarted();
         const IdentitySnapshot identity=Snapshot();
         const bool localRoomActive=
             identity.online &&
@@ -1492,6 +1772,79 @@ RoomSnapshot Room() {
     }
 
     return room;
+}
+
+ReleaseStatus Release() {
+    auto& state=ReleaseState();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    return state.snapshot;
+}
+
+bool LaunchInstalledUpdater() noexcept {
+#if defined(_WIN32)
+    try {
+        std::array<wchar_t,32768> modulePath{};
+        const DWORD length=GetModuleFileNameW(
+            nullptr,
+            modulePath.data(),
+            static_cast<DWORD>(modulePath.size()));
+        if(length==0 || length>=modulePath.size()) return false;
+
+        std::wstring path(modulePath.data(),length);
+        const auto executableSlash=path.find_last_of(L"\\/");
+        if(executableSlash==std::wstring::npos) return false;
+        path.resize(executableSlash);
+
+        const auto productSlash=path.find_last_of(L"\\/");
+        if(productSlash==std::wstring::npos) return false;
+        path.resize(productSlash+1);
+        path+=L"WiiCompiled-VoiceChat-Installer.exe";
+
+        const DWORD attributes=GetFileAttributesW(path.c_str());
+        if(attributes==INVALID_FILE_ATTRIBUTES ||
+           (attributes&FILE_ATTRIBUTE_DIRECTORY)!=0) {
+            auto& state=ReleaseState();
+            std::lock_guard<std::mutex> lock(state.mutex);
+            state.snapshot.status=
+                "Installed updater is missing; reinstall MKW Voice Chat";
+            return false;
+        }
+
+        std::wstring command=L"\""+path+L"\" update --wait-pid "+
+            std::to_wstring(GetCurrentProcessId());
+        std::vector<wchar_t> writable(command.begin(),command.end());
+        writable.push_back(L'\0');
+
+        STARTUPINFOW startup{};
+        startup.cb=sizeof(startup);
+        PROCESS_INFORMATION process{};
+        const BOOL started=CreateProcessW(
+            path.c_str(),
+            writable.data(),
+            nullptr,
+            nullptr,
+            FALSE,
+            CREATE_NEW_CONSOLE,
+            nullptr,
+            nullptr,
+            &startup,
+            &process);
+        if(!started) return false;
+
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+
+        auto& state=ReleaseState();
+        std::lock_guard<std::mutex> lock(state.mutex);
+        state.snapshot.status=
+            "Updater started; close the game to install the update";
+        return true;
+    } catch(...) {
+        return false;
+    }
+#else
+    return false;
+#endif
 }
 
 } // namespace RetroRewindVoiceBridge
