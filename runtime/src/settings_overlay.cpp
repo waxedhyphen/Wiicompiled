@@ -1243,7 +1243,7 @@ void DrawVoiceChatSettings() {
     };
 
     ImGui::TextUnformatted("Retro Rewind voice integration");
-    ImGui::TextDisabled("Integration: voice-bridge-v25-processing-dynamics-stage4c");
+    ImGui::TextDisabled("Integration: voice-bridge-v26-processing-mute-combos-stage4c");
 
     const std::string localName=playerNameFor(identity.profileId);
     const std::string localFriendCode=playerFriendCodeFor(identity.profileId);
@@ -1421,24 +1421,21 @@ void DrawVoiceChatSettings() {
     std::string muteOptionsPreview="None";
     if(controls.muteEveryone) {
         muteOptionsPreview="Mute everyone";
-    } else if(controls.muteOnlyFriends) {
-        muteOptionsPreview=controls.muteNewPlayers
-            ? "Mute friends + new players"
-            : "Mute only friends";
-    } else if(controls.muteEveryoneButFriends) {
-        muteOptionsPreview=controls.muteNewPlayers
-            ? "Mute everyone but friends + new players"
-            : "Mute everyone but friends";
-    } else if(controls.muteTeammates) {
-        muteOptionsPreview=controls.muteNewPlayers
-            ? "Mute teammates + new players"
-            : "Mute teammates";
-    } else if(controls.muteEveryoneButTeammates) {
-        muteOptionsPreview=controls.muteNewPlayers
-            ? "Mute everyone but teammates + new players"
-            : "Mute everyone but teammates";
-    } else if(controls.muteNewPlayers) {
-        muteOptionsPreview="Mute new players joining";
+    } else {
+        std::vector<std::string> muteParts;
+        if(controls.muteOnlyFriends) muteParts.emplace_back("friends");
+        else if(controls.muteEveryoneButFriends) muteParts.emplace_back("everyone but friends");
+        if(controls.muteTeammates) muteParts.emplace_back("teammates");
+        else if(controls.muteEveryoneButTeammates) muteParts.emplace_back("everyone but teammates");
+        if(controls.muteNewPlayers) muteParts.emplace_back("new players");
+
+        if(!muteParts.empty()) {
+            muteOptionsPreview="Mute ";
+            for(std::size_t i=0;i<muteParts.size();++i) {
+                if(i>0) muteOptionsPreview+=" + ";
+                muteOptionsPreview+=muteParts[i];
+            }
+        }
     }
 
     ImGui::TextUnformatted("Mute options");
@@ -1463,9 +1460,9 @@ void DrawVoiceChatSettings() {
             mkwvc::setEmbeddedVoiceMutePolicy(
                 false,
                 muteOnlyFriends,
-                false,
-                false,
-                false,
+                muteOnlyFriends ? false : controls.muteEveryoneButFriends,
+                controls.muteTeammates,
+                controls.muteEveryoneButTeammates,
                 controls.muteNewPlayers);
             controls=mkwvc::embeddedVoiceControls();
         }
@@ -1474,10 +1471,10 @@ void DrawVoiceChatSettings() {
         if(ImGui::Checkbox("Mute everyone but friends",&muteEveryoneButFriends)) {
             mkwvc::setEmbeddedVoiceMutePolicy(
                 false,
-                false,
+                muteEveryoneButFriends ? false : controls.muteOnlyFriends,
                 muteEveryoneButFriends,
-                false,
-                false,
+                controls.muteTeammates,
+                controls.muteEveryoneButTeammates,
                 controls.muteNewPlayers);
             controls=mkwvc::embeddedVoiceControls();
         }
@@ -1486,10 +1483,10 @@ void DrawVoiceChatSettings() {
         if(ImGui::Checkbox("Mute teammates",&muteTeammates)) {
             mkwvc::setEmbeddedVoiceMutePolicy(
                 false,
-                false,
-                false,
+                controls.muteOnlyFriends,
+                controls.muteEveryoneButFriends,
                 muteTeammates,
-                false,
+                muteTeammates ? false : controls.muteEveryoneButTeammates,
                 controls.muteNewPlayers);
             controls=mkwvc::embeddedVoiceControls();
         }
@@ -1498,9 +1495,9 @@ void DrawVoiceChatSettings() {
         if(ImGui::Checkbox("Mute everyone but teammates",&muteEveryoneButTeammates)) {
             mkwvc::setEmbeddedVoiceMutePolicy(
                 false,
-                false,
-                false,
-                false,
+                controls.muteOnlyFriends,
+                controls.muteEveryoneButFriends,
+                muteEveryoneButTeammates ? false : controls.muteTeammates,
                 muteEveryoneButTeammates,
                 controls.muteNewPlayers);
             controls=mkwvc::embeddedVoiceControls();
