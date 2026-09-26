@@ -1115,6 +1115,10 @@ void DrawVoiceChatOverlay() {
                 1.0f-controls.playerSpeakerBackgroundTransparency,
                 0.05f,
                 1.0f);
+            const bool useTwoColumns=
+                controls.peers.size()>6 &&
+                viewport->WorkSize.x>=460.0f;
+            std::size_t peerIndex=0;
             for(const auto& peer:controls.peers) {
                 ImGui::PushID(peer.memberId.c_str());
                 const ImVec4 speakingBg=peer.speaking
@@ -1160,6 +1164,13 @@ void DrawVoiceChatOverlay() {
                 ImGui::EndChild();
                 ImGui::PopStyleColor();
                 ImGui::PopID();
+
+                if(useTwoColumns &&
+                   peerIndex%2==0 &&
+                   peerIndex+1<controls.peers.size()) {
+                    ImGui::SameLine(0.0f,4.0f);
+                }
+                ++peerIndex;
             }
         }
         ImGui::End();
