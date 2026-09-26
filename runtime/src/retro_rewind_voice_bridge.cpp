@@ -982,9 +982,9 @@ void FinishReleaseCheck(
 }
 
 void ReleaseCheckWorker() {
-    constexpr wchar_t kHost[]=L"raw.githubusercontent.com";
+    constexpr wchar_t kHost[]=L"github.com";
     constexpr wchar_t kPath[]=
-        L"/waxedhyphen/MKW-VoiceChat/main/release/mkwvc-release.json";
+        L"/waxedhyphen/MKW-VoiceChat/releases/latest/download/mkwvc-release.json";
 
     WinHttpHandle session(WinHttpOpen(
         L"MKW VoiceChat release check/0.14",
