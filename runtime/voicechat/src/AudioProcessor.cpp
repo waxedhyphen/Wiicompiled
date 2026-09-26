@@ -85,60 +85,7 @@ public:
         std::scoped_lock lock(mutex_);
 
         if(settings_.noiseSuppression && settings_.noiseSuppressionStrength>0) {
-            std::array<std::int16_t,VoiceFormat::FrameSamples> dry{};
-            std::copy(samples.begin(),samples.end(),dry.begin());
             speex_preprocess_run(preprocess_,samples.data());
-
-            const float strength=static_cast<float>(settings_.noiseSuppressionStrength)/100.0f;
-            const float wet=0.85f*strength;
-            const float dryMix=1.0f-wet;
-            for(std::size_t i=0;i<samples.size();++i) {
-                const float mixed=
-                    static_cast<float>(dry[i])*dryMix+
-                    static_cast<float>(samples[i])*wet;
-                samples[i]=static_cast<std::int16_t>(std::clamp(
-                    static_cast<std::int32_t>(std::lround(mixed)),
-                    -32768,
-                    32767));
-            }
-        }
-
-        if(settings_.noiseGate && settings_.noiseGateThreshold>0) {
-            const float strength=static_cast<float>(settings_.noiseGateThreshold)/100.0f;
-            const float rms=rmsOf(samples);
-            const float openThreshold=
-                120.0f+std::pow(strength,1.35f)*2800.0f;
-            const float closeThreshold=openThreshold*0.68f;
-
-            if(gateOpen_) {
-                if(rms>=closeThreshold) {
-                    gateHoldFrames_=3;
-                } else if(gateHoldFrames_>0) {
-                    --gateHoldFrames_;
-                } else {
-                    gateOpen_=false;
-                }
-            } else if(rms>=openThreshold) {
-                gateOpen_=true;
-                gateHoldFrames_=3;
-            }
-
-            const float target=gateOpen_ ? 1.0f : 0.0f;
-            const float attack=smoothingCoefficient(4.0f);
-            const float release=smoothingCoefficient(90.0f);
-            for(auto& sample:samples) {
-                const float coefficient=target>gateGain_ ? attack : release;
-                gateGain_+=(target-gateGain_)*coefficient;
-                sample=static_cast<std::int16_t>(std::clamp(
-                    static_cast<std::int32_t>(
-                        std::lround(static_cast<float>(sample)*gateGain_)),
-                    -32768,
-                    32767));
-            }
-        } else {
-            gateGain_=1.0f;
-            gateOpen_=true;
-            gateHoldFrames_=0;
         }
 
         if(settings_.normalization) {
@@ -185,6 +132,44 @@ public:
             }
         } else {
             normalizationGain_=1.0f;
+        }
+
+        if(settings_.noiseGate && settings_.noiseGateThreshold>0) {
+            const float strength=static_cast<float>(settings_.noiseGateThreshold)/100.0f;
+            const float rms=rmsOf(samples);
+            const float openThreshold=
+                4.0f+std::pow(strength,2.2f)*2200.0f;
+            const float closeThreshold=openThreshold*0.60f;
+
+            if(gateOpen_) {
+                if(rms>=closeThreshold) {
+                    gateHoldFrames_=6;
+                } else if(gateHoldFrames_>0) {
+                    --gateHoldFrames_;
+                } else {
+                    gateOpen_=false;
+                }
+            } else if(rms>=openThreshold) {
+                gateOpen_=true;
+                gateHoldFrames_=6;
+            }
+
+            const float target=gateOpen_ ? 1.0f : 0.0f;
+            const float attack=smoothingCoefficient(3.0f);
+            const float release=smoothingCoefficient(150.0f);
+            for(auto& sample:samples) {
+                const float coefficient=target>gateGain_ ? attack : release;
+                gateGain_+=(target-gateGain_)*coefficient;
+                sample=static_cast<std::int16_t>(std::clamp(
+                    static_cast<std::int32_t>(
+                        std::lround(static_cast<float>(sample)*gateGain_)),
+                    -32768,
+                    32767));
+            }
+        } else {
+            gateGain_=1.0f;
+            gateOpen_=true;
+            gateHoldFrames_=0;
         }
 
         const float boost=settings_.microphoneBoost;
@@ -269,7 +254,8 @@ private:
         const float strength=
             static_cast<float>(settings_.noiseSuppressionStrength)/100.0f;
         int noiseSuppress=
-            -static_cast<int>(std::lround(3.0f+21.0f*strength));
+            -static_cast<int>(std::lround(
+                1.0f+11.0f*std::pow(strength,1.25f)));
 
         speex_preprocess_ctl(preprocess_,SPEEX_PREPROCESS_SET_DENOISE,&denoise);
         speex_preprocess_ctl(preprocess_,SPEEX_PREPROCESS_SET_AGC,&agc);
