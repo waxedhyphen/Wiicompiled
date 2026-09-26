@@ -101,22 +101,41 @@ std::int64_t steadyNowMs() {
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+constexpr float BaseMicrophoneGain=1.25f;
+constexpr float BasePlaybackGain=1.25f;
+
+float softLimit(float value) {
+    constexpr float knee=30000.0f;
+    constexpr float ceiling=32600.0f;
+    const float magnitude=std::abs(value);
+    if(magnitude<=knee) return value;
+    const float compressed=knee+(ceiling-knee)*(1.0f-std::exp(-(magnitude-knee)/(ceiling-knee)));
+    return std::copysign(compressed,value);
+}
+
 void applyGainWithLimiter(std::span<std::int16_t> samples,float gain,float& limiterGain) {
     gain=std::max(0.0f,gain);
     float peak=0.0f;
     for(const auto sample:samples) peak=std::max(peak,std::abs(static_cast<float>(sample))*gain);
 
-    constexpr float ceiling=31600.0f;
+    constexpr float ceiling=30000.0f;
     const float desired=peak>ceiling ? ceiling/peak : 1.0f;
-    if(desired<limiterGain) limiterGain=desired;
-    else limiterGain+=std::min(1.0f,desired-limiterGain)*0.06f;
-    limiterGain=std::clamp(limiterGain,0.0f,1.0f);
+    const float previous=limiterGain;
+    const float target=desired<previous
+        ? desired
+        : previous+(desired-previous)*0.04f;
 
-    const float totalGain=gain*limiterGain;
-    for(auto& sample:samples) {
-        const auto scaled=static_cast<std::int32_t>(std::lround(static_cast<float>(sample)*totalGain));
-        sample=static_cast<std::int16_t>(std::clamp(scaled,-32768,32767));
+    const float denominator=samples.size()>1
+        ? static_cast<float>(samples.size()-1)
+        : 1.0f;
+    for(std::size_t i=0;i<samples.size();++i) {
+        const float t=static_cast<float>(i)/denominator;
+        const float smoothGain=previous+(target-previous)*t;
+        const float value=softLimit(static_cast<float>(samples[i])*gain*smoothGain);
+        samples[i]=static_cast<std::int16_t>(std::clamp(
+            static_cast<std::int32_t>(std::lround(value)),-32768,32767));
     }
+    limiterGain=std::clamp(target,0.0f,1.0f);
 }
 
 }
@@ -532,7 +551,7 @@ void VoiceClient::senderLoop() {
 
             processor_.processCapture(samples);
 
-            const auto gain=microphoneGain_.load(std::memory_order_relaxed);
+            const auto gain=microphoneGain_.load(std::memory_order_relaxed)*BaseMicrophoneGain;
             applyGainWithLimiter(samples,gain,microphoneLimiterGain);
 
             const bool microphoneTest=microphoneTestEnabled_.load(std::memory_order_relaxed);
@@ -540,7 +559,8 @@ void VoiceClient::senderLoop() {
             const auto processedRms=rmsOf(samples);
             if(microphoneTest) {
                 std::copy(samples.begin(),samples.end(),monitor.begin());
-                const auto monitorVolume=playbackVolume_.load(std::memory_order_relaxed);
+                const auto monitorVolume=
+                    playbackVolume_.load(std::memory_order_relaxed)*BasePlaybackGain;
                 applyGainWithLimiter(monitor,monitorVolume,monitorLimiterGain);
                 audio_.queueMonitor(monitor);
             }
@@ -824,21 +844,28 @@ void VoiceClient::mixerLoop() {
             playbackPeak_.store(0,std::memory_order_relaxed);
         } else if(anyFrame) {
             PcmFrame output{};
-            const auto globalVolume=playbackVolume_.load(std::memory_order_relaxed);
+            const auto globalVolume=
+                playbackVolume_.load(std::memory_order_relaxed)*BasePlaybackGain;
             float peak=0.0f;
             for(const auto sample:mixed) peak=std::max(peak,std::abs(sample*globalVolume));
 
-            constexpr float ceiling=31600.0f;
+            constexpr float ceiling=30000.0f;
             const float desired=peak>ceiling ? ceiling/peak : 1.0f;
-            if(desired<limiterGain) limiterGain=desired;
-            else limiterGain+=(desired-limiterGain)*0.05f;
-            limiterGain=std::clamp(limiterGain,0.0f,1.0f);
-
-            const float finalGain=globalVolume*limiterGain;
+            const float previous=limiterGain;
+            const float target=desired<previous
+                ? desired
+                : previous+(desired-previous)*0.035f;
+            const float denominator=output.size()>1
+                ? static_cast<float>(output.size()-1)
+                : 1.0f;
             for(std::size_t i=0;i<output.size();++i) {
-                const auto scaled=static_cast<std::int32_t>(std::lround(mixed[i]*finalGain));
-                output[i]=static_cast<std::int16_t>(std::clamp(scaled,-32768,32767));
+                const float t=static_cast<float>(i)/denominator;
+                const float smoothGain=previous+(target-previous)*t;
+                const float value=softLimit(mixed[i]*globalVolume*smoothGain);
+                output[i]=static_cast<std::int16_t>(std::clamp(
+                    static_cast<std::int32_t>(std::lround(value)),-32768,32767));
             }
+            limiterGain=std::clamp(target,0.0f,1.0f);
 
             playbackPeak_.store(peakOf(output),std::memory_order_relaxed);
             audio_.queuePlayback(std::span<const std::int16_t>(output));
