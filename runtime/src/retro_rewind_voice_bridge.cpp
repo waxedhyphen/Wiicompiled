@@ -69,10 +69,13 @@ RoomLookupState& RoomState() {
     return *state;
 }
 
+constexpr auto kReleaseCheckInterval = std::chrono::minutes(10);
+
 struct ReleaseCheckState {
     std::mutex mutex;
     ReleaseStatus snapshot;
     bool workerRunning = false;
+    std::chrono::steady_clock::time_point nextCheck{};
 };
 
 ReleaseCheckState& ReleaseState() {
@@ -965,20 +968,66 @@ struct WinHttpHandle {
 };
 
 void FinishReleaseCheck(
-    bool complete,
-    bool updateAvailable,
+    bool productRequired,
+    bool integrationRequired,
     bool protocolRequired,
+    bool wiiCompiledRequired,
+    std::uint32_t minimumProtocol,
     std::string latestVersion,
+    std::string latestPatchRevision,
+    std::string requiredWiiCompiledVersion,
     std::string status) {
     auto& state=ReleaseState();
     std::lock_guard<std::mutex> lock(state.mutex);
     state.workerRunning=false;
     state.snapshot.checkStarted=true;
-    state.snapshot.checkComplete=complete;
-    state.snapshot.updateAvailable=updateAvailable;
+    state.snapshot.checkComplete=true;
+    state.snapshot.checkSucceeded=true;
+    state.snapshot.productUpdateRequired=productRequired;
+    state.snapshot.integrationUpdateRequired=integrationRequired;
     state.snapshot.protocolUpdateRequired=protocolRequired;
+    state.snapshot.wiiCompiledUpdateRequired=wiiCompiledRequired;
+    state.snapshot.updateAvailable=
+        productRequired ||
+        integrationRequired ||
+        protocolRequired ||
+        wiiCompiledRequired;
+    state.snapshot.minimumProtocol=minimumProtocol;
     state.snapshot.latestVersion=std::move(latestVersion);
+    state.snapshot.latestPatchRevision=std::move(latestPatchRevision);
+    state.snapshot.requiredWiiCompiledVersion=
+        std::move(requiredWiiCompiledVersion);
     state.snapshot.status=std::move(status);
+    state.nextCheck=
+        std::chrono::steady_clock::now()+kReleaseCheckInterval;
+}
+
+void FinishReleaseCheckFailure(std::string status) {
+    auto& state=ReleaseState();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    const bool hadCompletedCheck=state.snapshot.checkComplete;
+    state.workerRunning=false;
+    state.snapshot.checkStarted=true;
+    state.snapshot.checkComplete=true;
+    state.snapshot.checkSucceeded=false;
+
+    if(!hadCompletedCheck) {
+        state.snapshot.updateAvailable=false;
+        state.snapshot.productUpdateRequired=false;
+        state.snapshot.integrationUpdateRequired=false;
+        state.snapshot.protocolUpdateRequired=false;
+        state.snapshot.wiiCompiledUpdateRequired=false;
+        state.snapshot.minimumProtocol=0;
+        state.snapshot.latestVersion.clear();
+        state.snapshot.latestPatchRevision.clear();
+        state.snapshot.requiredWiiCompiledVersion.clear();
+        state.snapshot.status=std::move(status);
+    } else if(!state.snapshot.updateAvailable) {
+        state.snapshot.status=std::move(status);
+    }
+
+    state.nextCheck=
+        std::chrono::steady_clock::now()+kReleaseCheckInterval;
 }
 
 void ReleaseCheckWorker() {
@@ -993,9 +1042,7 @@ void ReleaseCheckWorker() {
         WINHTTP_NO_PROXY_BYPASS,
         0));
     if(!session.value) {
-        FinishReleaseCheck(
-            true,false,false,{},
-            "Could not check for updates");
+        FinishReleaseCheckFailure("Could not check for updates");
         return;
     }
     WinHttpSetTimeouts(session.value,5000,5000,5000,5000);
@@ -1006,9 +1053,7 @@ void ReleaseCheckWorker() {
         INTERNET_DEFAULT_HTTPS_PORT,
         0));
     if(!connection.value) {
-        FinishReleaseCheck(
-            true,false,false,{},
-            "Could not check for updates");
+        FinishReleaseCheckFailure("Could not check for updates");
         return;
     }
 
@@ -1021,9 +1066,7 @@ void ReleaseCheckWorker() {
         WINHTTP_DEFAULT_ACCEPT_TYPES,
         WINHTTP_FLAG_SECURE));
     if(!request.value) {
-        FinishReleaseCheck(
-            true,false,false,{},
-            "Could not check for updates");
+        FinishReleaseCheckFailure("Could not check for updates");
         return;
     }
 
@@ -1038,9 +1081,7 @@ void ReleaseCheckWorker() {
             0,
             0) ||
        !WinHttpReceiveResponse(request.value,nullptr)) {
-        FinishReleaseCheck(
-            true,false,false,{},
-            "Could not check for updates");
+        FinishReleaseCheckFailure("Could not check for updates");
         return;
     }
 
@@ -1053,28 +1094,28 @@ void ReleaseCheckWorker() {
             &statusCode,
             &statusSize,
             WINHTTP_NO_HEADER_INDEX)) {
-        FinishReleaseCheck(
-            true,false,false,{},
-            "Could not check for updates");
+        FinishReleaseCheckFailure("Could not check for updates");
         return;
     }
     if(statusCode==404) {
         FinishReleaseCheck(
-            true,false,false,{},
+            false,false,false,false,0,
+            {},{},{},
             "No published release yet");
         return;
     }
     if(statusCode!=200) {
-        FinishReleaseCheck(
-            true,false,false,{},
-            "Could not check for updates");
+        FinishReleaseCheckFailure("Could not check for updates");
         return;
     }
 
     std::string json;
     while(json.size()<32768) {
         DWORD available=0;
-        if(!WinHttpQueryDataAvailable(request.value,&available)) break;
+        if(!WinHttpQueryDataAvailable(request.value,&available)) {
+            FinishReleaseCheckFailure("Could not check for updates");
+            return;
+        }
         if(available==0) break;
         const DWORD chunk=
             static_cast<DWORD>(
@@ -1088,7 +1129,8 @@ void ReleaseCheckWorker() {
                 buffer.data(),
                 chunk,
                 &read)) {
-            break;
+            FinishReleaseCheckFailure("Could not check for updates");
+            return;
         }
         buffer.resize(read);
         json+=buffer;
@@ -1098,6 +1140,8 @@ void ReleaseCheckWorker() {
     const std::string latest=JsonStringValue(json,"version");
     const std::string latestPatchRevision=
         JsonStringValue(json,"patchRevision");
+    const std::string requiredWiiCompiledVersion=
+        JsonStringValue(json,"wiiCompiledVersion");
     int schema=0;
     int minimumProtocol=0;
     if(!JsonIntValue(json,"schemaVersion",schema) ||
@@ -1105,53 +1149,74 @@ void ReleaseCheckWorker() {
        !JsonIntValue(json,"minimumProtocol",minimumProtocol) ||
        minimumProtocol<1 ||
        latest.empty() ||
-       latestPatchRevision.empty()) {
-        FinishReleaseCheck(
-            true,false,false,{},
-            "Update manifest is invalid");
+       latestPatchRevision.empty() ||
+       requiredWiiCompiledVersion.empty()) {
+        FinishReleaseCheckFailure("Update manifest is invalid");
         return;
     }
 
     std::array<int,3> parsed{};
-    if(!ParseVersionTriplet(latest,parsed)) {
-        FinishReleaseCheck(
-            true,false,false,{},
-            "Update manifest has invalid version");
+    std::array<int,3> parsedWiiCompiled{};
+    if(!ParseVersionTriplet(latest,parsed) ||
+       !ParseVersionTriplet(
+           requiredWiiCompiledVersion,
+           parsedWiiCompiled)) {
+        FinishReleaseCheckFailure("Update manifest has invalid version");
         return;
     }
 
     const int versionComparison=
         CompareVersions(latest,kMkwVoiceChatVersion);
+    const bool releaseNotOlder=versionComparison>=0;
+    const bool productRequired=versionComparison>0;
     const bool protocolRequired=
+        releaseNotOlder &&
         minimumProtocol>
         static_cast<int>(kMkwVoiceChatProtocolVersion);
-    const bool integrationMismatch=
+    const bool wiiCompiledRequired=
+        releaseNotOlder &&
+        CompareVersions(
+            requiredWiiCompiledVersion,
+            kMkwVoiceChatWiiCompiledVersion)!=0;
+    const bool integrationRequired=
         versionComparison==0 &&
         latestPatchRevision!=kMkwVoiceChatPatchRevision;
-    const bool updateAvailable=
-        versionComparison>0 || integrationMismatch;
+    const bool updateRequired=
+        productRequired ||
+        integrationRequired ||
+        protocolRequired ||
+        wiiCompiledRequired;
 
     FinishReleaseCheck(
-        true,
-        updateAvailable||protocolRequired,
+        productRequired,
+        integrationRequired,
         protocolRequired,
+        wiiCompiledRequired,
+        static_cast<std::uint32_t>(minimumProtocol),
         latest,
-        protocolRequired
-            ? "Update required for Voice Chat compatibility"
-            : integrationMismatch
-                ? "Integration update available"
-                : updateAvailable
-                    ? "Update available"
-                    : "Current");
+        latestPatchRevision,
+        requiredWiiCompiledVersion,
+        updateRequired ? "Update required" : "Current");
 }
 
 void EnsureReleaseCheckStarted() {
     auto& state=ReleaseState();
     {
         std::lock_guard<std::mutex> lock(state.mutex);
-        if(state.snapshot.checkStarted || state.workerRunning) return;
+        if(state.workerRunning) return;
+
+        const auto now=std::chrono::steady_clock::now();
+        const bool initial=!state.snapshot.checkStarted;
+        const bool periodic=
+            state.snapshot.checkComplete &&
+            state.nextCheck!=std::chrono::steady_clock::time_point{} &&
+            now>=state.nextCheck;
+        if(!initial && !periodic) return;
+
         state.snapshot.checkStarted=true;
-        state.snapshot.status="Checking for updates...";
+        if(!state.snapshot.checkComplete) {
+            state.snapshot.status="Checking for updates...";
+        }
         state.workerRunning=true;
     }
 
@@ -1722,6 +1787,27 @@ IdentitySnapshot Snapshot() {
 void ServiceRoomLookup() noexcept {
     try {
         EnsureReleaseCheckStarted();
+
+        ReleaseStatus release;
+        {
+            auto& releaseState=ReleaseState();
+            std::lock_guard<std::mutex> lock(releaseState.mutex);
+            release=releaseState.snapshot;
+        }
+
+        const bool waitingForInitialCheck=
+            !release.checkComplete;
+        const bool updateRequired=
+            release.checkComplete &&
+            release.updateAvailable;
+        mkwvc::setEmbeddedVoiceRuntimeBlocked(
+            waitingForInitialCheck || updateRequired,
+            waitingForInitialCheck
+                ? "Checking for MKW Voice Chat updates..."
+                : (updateRequired
+                    ? "MKW Voice Chat update required"
+                    : std::string{}));
+
         const IdentitySnapshot identity=Snapshot();
         const bool localRoomActive=
             identity.online &&
@@ -1858,10 +1944,8 @@ bool LaunchInstalledUpdater() noexcept {
 
         auto& state=ReleaseState();
         std::lock_guard<std::mutex> lock(state.mutex);
-        state.snapshot.updateAvailable=false;
-        state.snapshot.protocolUpdateRequired=false;
         state.snapshot.status=
-            "Updater started; close the game to install the update";
+            "Updater started; waiting for game exit";
         return true;
     } catch(...) {
         return false;
