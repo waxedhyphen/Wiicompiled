@@ -1837,6 +1837,8 @@ bool LaunchInstalledUpdater() noexcept {
 
         auto& state=ReleaseState();
         std::lock_guard<std::mutex> lock(state.mutex);
+        state.snapshot.updateAvailable=false;
+        state.snapshot.protocolUpdateRequired=false;
         state.snapshot.status=
             "Updater started; close the game to install the update";
         return true;
