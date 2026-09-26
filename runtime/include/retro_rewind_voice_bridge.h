@@ -7,6 +7,18 @@
 
 namespace RetroRewindVoiceBridge {
 
+inline constexpr const char* kMkwVoiceChatVersion = "0.14.0";
+inline constexpr std::uint32_t kMkwVoiceChatProtocolVersion = 1;
+
+struct ReleaseStatus {
+    bool checkStarted = false;
+    bool checkComplete = false;
+    bool updateAvailable = false;
+    bool protocolUpdateRequired = false;
+    std::string latestVersion;
+    std::string status;
+};
+
 // Host-only snapshot of the live Retro Rewind GPCM identity observed by the
 // WiiCompiled networking HLE. The session key is intentionally memory-only:
 // callers must never persist or log it.
@@ -63,5 +75,8 @@ struct RoomSnapshot {
  // pushed presence updates are consumed without network I/O on the game/UI thread.
 void ServiceRoomLookup() noexcept;
 RoomSnapshot Room();
+
+ReleaseStatus Release();
+bool LaunchInstalledUpdater() noexcept;
 
 } // namespace RetroRewindVoiceBridge
