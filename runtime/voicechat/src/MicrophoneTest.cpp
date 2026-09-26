@@ -37,27 +37,12 @@ float softLimit(float value) {
 
 void applyGain(std::span<std::int16_t> samples,float gain,float& limiterGain) {
     gain=std::max(0.0f,gain);
-    float peak=0.0f;
-    for(const auto sample:samples) peak=std::max(peak,std::abs(static_cast<float>(sample))*gain);
-
-    constexpr float ceiling=30000.0f;
-    const float desired=peak>ceiling ? ceiling/peak : 1.0f;
-    const float previous=limiterGain;
-    const float target=desired<previous
-        ? desired
-        : previous+(desired-previous)*0.04f;
-    const float denominator=samples.size()>1
-        ? static_cast<float>(samples.size()-1)
-        : 1.0f;
-
-    for(std::size_t i=0;i<samples.size();++i) {
-        const float t=static_cast<float>(i)/denominator;
-        const float smoothGain=previous+(target-previous)*t;
-        const float value=softLimit(static_cast<float>(samples[i])*gain*smoothGain);
-        samples[i]=static_cast<std::int16_t>(std::clamp(
+    for(auto& sample:samples) {
+        const float value=softLimit(static_cast<float>(sample)*gain);
+        sample=static_cast<std::int16_t>(std::clamp(
             static_cast<std::int32_t>(std::lround(value)),-32768,32767));
     }
-    limiterGain=std::clamp(target,0.0f,1.0f);
+    limiterGain=1.0f;
 }
 
 }
