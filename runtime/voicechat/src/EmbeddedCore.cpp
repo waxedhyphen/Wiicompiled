@@ -90,6 +90,8 @@ struct EmbeddedVoiceSessionState {
     float microphoneGain=1.0f;
     float playbackVolume=1.0f;
     bool enabled=false;
+    bool runtimeBlocked=false;
+    std::string runtimeBlockReason;
     bool overlayVisible=true;
     bool localStatusOverlayVisible=true;
     bool playerSpeakersOverlayVisible=true;
@@ -846,6 +848,25 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
         }
         if(policyInputsChanged) applyAllRemoteVolumes(state);
 
+        if(state.runtimeBlocked) {
+            state.microphoneTest=false;
+            state.pushToTalkHeldInput=false;
+            state.pushToMuteHeldInput=false;
+            const std::string blockedStatus=
+                state.runtimeBlockReason.empty()
+                    ? "Voice Chat temporarily unavailable"
+                    : state.runtimeBlockReason;
+            if(state.signaling ||
+               state.voiceClient ||
+               state.microphoneTestRuntime ||
+               state.status.lifecycleActive) {
+                clearVoiceSessionLocked(state,blockedStatus);
+            } else {
+                state.status.status=blockedStatus;
+            }
+            return;
+        }
+
         if(!state.enabled) {
             if(state.signaling || state.voiceClient || state.microphoneTestRuntime || state.status.lifecycleActive) {
                 clearVoiceSessionLocked(state,"Disabled");
@@ -1153,6 +1174,8 @@ EmbeddedVoiceControls embeddedVoiceControls() {
 
     EmbeddedVoiceControls controls;
     controls.enabled=state.enabled;
+    controls.runtimeBlocked=state.runtimeBlocked;
+    controls.runtimeBlockReason=state.runtimeBlockReason;
     controls.overlayVisible=state.overlayVisible;
     controls.localStatusOverlayVisible=state.localStatusOverlayVisible;
     controls.playerSpeakersOverlayVisible=state.playerSpeakersOverlayVisible;
@@ -1227,6 +1250,37 @@ EmbeddedVoiceControls embeddedVoiceControls() {
     return controls;
 }
 
+void setEmbeddedVoiceRuntimeBlocked(bool blocked,std::string reason) {
+    auto& state=voiceSessionState();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    loadSettingsLocked(state);
+
+    if(!blocked) reason.clear();
+    if(state.runtimeBlocked==blocked &&
+       state.runtimeBlockReason==reason) {
+        return;
+    }
+
+    state.runtimeBlocked=blocked;
+    state.runtimeBlockReason=std::move(reason);
+
+    if(state.runtimeBlocked) {
+        state.microphoneTest=false;
+        state.pushToTalkHeldInput=false;
+        state.pushToMuteHeldInput=false;
+        clearVoiceSessionLocked(
+            state,
+            state.runtimeBlockReason.empty()
+                ? "Voice Chat temporarily unavailable"
+                : state.runtimeBlockReason);
+        return;
+    }
+
+    state.status.status=state.enabled
+        ? "Enabled; waiting for Retro Rewind room"
+        : "Disabled";
+}
+
 void setEmbeddedVoiceEnabled(bool enabled) {
     std::vector<std::string> inputs;
     std::vector<std::string> outputs;
@@ -1264,7 +1318,11 @@ void setEmbeddedVoiceEnabled(bool enabled) {
         state.outputDevice.clear();
         persistString("output_device",{});
     }
-    state.status.status="Enabled; waiting for Retro Rewind room";
+    state.status.status=state.runtimeBlocked
+        ? (state.runtimeBlockReason.empty()
+            ? "Voice Chat temporarily unavailable"
+            : state.runtimeBlockReason)
+        : "Enabled; waiting for Retro Rewind room";
 }
 
 void setEmbeddedVoiceOverlayVisible(bool visible) {
