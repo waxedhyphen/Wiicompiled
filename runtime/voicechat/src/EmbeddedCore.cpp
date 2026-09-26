@@ -236,15 +236,13 @@ void loadSettingsLocked(EmbeddedVoiceSessionState& state) {
             state.muteTeammates=false;
             state.muteEveryoneButTeammates=false;
             state.muteNewPlayers=false;
-        } else if(state.muteOnlyFriends) {
-            state.muteEveryoneButFriends=false;
-            state.muteTeammates=false;
-            state.muteEveryoneButTeammates=false;
-        } else if(state.muteEveryoneButFriends) {
-            state.muteTeammates=false;
-            state.muteEveryoneButTeammates=false;
-        } else if(state.muteTeammates) {
-            state.muteEveryoneButTeammates=false;
+        } else {
+            if(state.muteOnlyFriends && state.muteEveryoneButFriends) {
+                state.muteEveryoneButFriends=false;
+            }
+            if(state.muteTeammates && state.muteEveryoneButTeammates) {
+                state.muteEveryoneButTeammates=false;
+            }
         }
 
         if(state.pushToTalk && state.voiceActivation) state.voiceActivation=false;
@@ -1287,15 +1285,13 @@ void setEmbeddedVoiceMutePolicy(
         muteTeammates=false;
         muteEveryoneButTeammates=false;
         muteNewPlayers=false;
-    } else if(muteOnlyFriends) {
-        muteEveryoneButFriends=false;
-        muteTeammates=false;
-        muteEveryoneButTeammates=false;
-    } else if(muteEveryoneButFriends) {
-        muteTeammates=false;
-        muteEveryoneButTeammates=false;
-    } else if(muteTeammates) {
-        muteEveryoneButTeammates=false;
+    } else {
+        if(muteOnlyFriends && muteEveryoneButFriends) {
+            muteEveryoneButFriends=false;
+        }
+        if(muteTeammates && muteEveryoneButTeammates) {
+            muteEveryoneButTeammates=false;
+        }
     }
 
     state.muteEveryone=muteEveryone;
