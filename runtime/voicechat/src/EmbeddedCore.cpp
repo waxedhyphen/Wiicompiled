@@ -1027,14 +1027,14 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
                         if(!metadata.displayName.empty()) player->displayName=metadata.displayName;
                         if(!metadata.friendCode.empty()) player->friendCode=metadata.friendCode;
                     } else {
-                        EmbeddedVoiceRoomPlayer player;
-                        player.profileId=metadata.participantId;
-                        player.displayName=metadata.displayName.empty()
+                        EmbeddedVoiceRoomPlayer newPlayer;
+                        newPlayer.profileId=metadata.participantId;
+                        newPlayer.displayName=metadata.displayName.empty()
                             ? metadata.participantId
                             : metadata.displayName;
-                        player.friendCode=metadata.friendCode;
-                        player.voiceChat=true;
-                        state.status.roomPlayers.push_back(std::move(player));
+                        newPlayer.friendCode=metadata.friendCode;
+                        newPlayer.voiceChat=true;
+                        state.status.roomPlayers.push_back(std::move(newPlayer));
                     }
                     state.developmentPeers[memberId]=std::move(metadata);
                     applyRemoteVolumeForMember(state,memberId);
