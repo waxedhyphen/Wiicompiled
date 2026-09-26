@@ -1052,8 +1052,19 @@ void ReleaseCheckWorker() {
             WINHTTP_HEADER_NAME_BY_INDEX,
             &statusCode,
             &statusSize,
-            WINHTTP_NO_HEADER_INDEX) ||
-       statusCode!=200) {
+            WINHTTP_NO_HEADER_INDEX)) {
+        FinishReleaseCheck(
+            true,false,false,{},
+            "Could not check for updates");
+        return;
+    }
+    if(statusCode==404) {
+        FinishReleaseCheck(
+            true,false,false,{},
+            "No published release yet");
+        return;
+    }
+    if(statusCode!=200) {
         FinishReleaseCheck(
             true,false,false,{},
             "Could not check for updates");
