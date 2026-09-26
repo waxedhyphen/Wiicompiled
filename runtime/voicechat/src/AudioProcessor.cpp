@@ -98,24 +98,40 @@ public:
             constexpr float gateRms=350.0f;
             constexpr float targetRms=5200.0f;
             constexpr float ceiling=30000.0f;
+            const float previousGain=normalizationGain_;
 
             if(rms<gateRms) {
-                if(normalizationGain_>1.0f) normalizationGain_=1.0f;
-                else normalizationGain_+=(1.0f-normalizationGain_)*0.08f;
+                normalizationGain_+=(1.0f-normalizationGain_)*0.035f;
             } else {
-                const float targetGain=std::clamp(targetRms/std::max(rms,1.0f),0.55f,2.5f);
-                const float smoothing=targetGain<normalizationGain_ ? 0.45f : 0.035f;
+                const float targetGain=std::clamp(
+                    targetRms/std::max(rms,1.0f),
+                    0.55f,
+                    2.5f);
+                const float smoothing=
+                    targetGain<normalizationGain_ ? 0.16f : 0.025f;
                 normalizationGain_+=(targetGain-normalizationGain_)*smoothing;
             }
 
-            if(peak>0.0f) normalizationGain_=std::min(normalizationGain_,ceiling/peak);
+            if(peak>0.0f) {
+                normalizationGain_=std::min(
+                    normalizationGain_,
+                    ceiling/peak);
+            }
             normalizationGain_=std::clamp(normalizationGain_,0.35f,2.5f);
 
-            if(std::abs(normalizationGain_-1.0f)>=0.001f) {
-                for(auto& sample:samples) {
+            if(std::abs(previousGain-1.0f)>=0.001f ||
+               std::abs(normalizationGain_-1.0f)>=0.001f) {
+                const float denominator=samples.size()>1
+                    ? static_cast<float>(samples.size()-1)
+                    : 1.0f;
+                for(std::size_t i=0;i<samples.size();++i) {
+                    const float t=static_cast<float>(i)/denominator;
+                    const float gain=
+                        previousGain+(normalizationGain_-previousGain)*t;
                     const auto scaled=static_cast<std::int32_t>(
-                        std::lround(static_cast<float>(sample)*normalizationGain_));
-                    sample=static_cast<std::int16_t>(std::clamp(scaled,-32768,32767));
+                        std::lround(static_cast<float>(samples[i])*gain));
+                    samples[i]=static_cast<std::int16_t>(
+                        std::clamp(scaled,-32768,32767));
                 }
             }
         } else {
