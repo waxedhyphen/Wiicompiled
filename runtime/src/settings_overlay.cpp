@@ -1257,8 +1257,9 @@ void DrawVoiceChatSettings() {
     ImGui::TextUnformatted("Retro Rewind voice integration");
     const auto release=RetroRewindVoiceBridge::Release();
     ImGui::TextDisabled(
-        "MKW Voice Chat %s | Integration: voice-bridge-v30-rnnoise-stage4i",
-        RetroRewindVoiceBridge::kMkwVoiceChatVersion);
+        "MKW Voice Chat %s | Integration: %s",
+        RetroRewindVoiceBridge::kMkwVoiceChatVersion,
+        RetroRewindVoiceBridge::kMkwVoiceChatPatchRevision);
     ImGui::Text(
         "Update status: %s",
         release.status.empty() ? "Checking..." : release.status.c_str());
