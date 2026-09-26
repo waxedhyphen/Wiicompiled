@@ -91,6 +91,9 @@ struct EmbeddedVoiceSessionState {
     float playbackVolume=1.0f;
     bool enabled=false;
     bool overlayVisible=true;
+    bool localStatusOverlayVisible=true;
+    bool playerSpeakersOverlayVisible=true;
+    float playerSpeakerBackgroundTransparency=0.30f;
     bool muteEveryone=false;
     bool muteOnlyFriends=false;
     bool muteEveryoneButFriends=false;
@@ -167,6 +170,13 @@ void loadSettingsLocked(EmbeddedVoiceSessionState& state) {
             }
             if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","enabled")) state.enabled=*value;
             if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","overlay_visible")) state.overlayVisible=*value;
+            if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","overlay_local_status")) state.localStatusOverlayVisible=*value;
+            else state.localStatusOverlayVisible=state.overlayVisible;
+            if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","overlay_player_speakers")) state.playerSpeakersOverlayVisible=*value;
+            else state.playerSpeakersOverlayVisible=state.overlayVisible;
+            if(const auto value=RuntimeConfigFile::FindConfigFloat(document,"voicechat","overlay_player_speaker_transparency")) {
+                state.playerSpeakerBackgroundTransparency=std::clamp(*value,0.0f,0.95f);
+            }
             if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","mute_everyone")) state.muteEveryone=*value;
             if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","mute_only_friends")) state.muteOnlyFriends=*value;
             if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","mute_everyone_but_friends")) state.muteEveryoneButFriends=*value;
@@ -1055,6 +1065,9 @@ EmbeddedVoiceControls embeddedVoiceControls() {
     EmbeddedVoiceControls controls;
     controls.enabled=state.enabled;
     controls.overlayVisible=state.overlayVisible;
+    controls.localStatusOverlayVisible=state.localStatusOverlayVisible;
+    controls.playerSpeakersOverlayVisible=state.playerSpeakersOverlayVisible;
+    controls.playerSpeakerBackgroundTransparency=state.playerSpeakerBackgroundTransparency;
     controls.muteEveryone=state.muteEveryone;
     controls.muteOnlyFriends=state.muteOnlyFriends;
     controls.muteEveryoneButFriends=state.muteEveryoneButFriends;
@@ -1166,7 +1179,31 @@ void setEmbeddedVoiceOverlayVisible(bool visible) {
     std::lock_guard<std::mutex> lock(state.mutex);
     loadSettingsLocked(state);
     state.overlayVisible=visible;
+    state.localStatusOverlayVisible=visible;
+    state.playerSpeakersOverlayVisible=visible;
     persistBool("overlay_visible",visible);
+    persistBool("overlay_local_status",visible);
+    persistBool("overlay_player_speakers",visible);
+}
+
+void setEmbeddedVoiceOverlayOptions(
+    bool localStatusVisible,
+    bool playerSpeakersVisible,
+    float playerSpeakerBackgroundTransparency) {
+    auto& state=voiceSessionState();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    loadSettingsLocked(state);
+    state.localStatusOverlayVisible=localStatusVisible;
+    state.playerSpeakersOverlayVisible=playerSpeakersVisible;
+    state.overlayVisible=localStatusVisible || playerSpeakersVisible;
+    state.playerSpeakerBackgroundTransparency=
+        std::clamp(playerSpeakerBackgroundTransparency,0.0f,0.95f);
+    persistBool("overlay_visible",state.overlayVisible);
+    persistBool("overlay_local_status",state.localStatusOverlayVisible);
+    persistBool("overlay_player_speakers",state.playerSpeakersOverlayVisible);
+    persistFloat(
+        "overlay_player_speaker_transparency",
+        state.playerSpeakerBackgroundTransparency);
 }
 
 void setEmbeddedVoiceMutePolicy(
