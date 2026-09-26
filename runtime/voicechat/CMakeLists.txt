@@ -159,7 +159,10 @@ target_compile_features(mkw_voicechat_core_stage3 PRIVATE cxx_std_23)
 target_compile_definitions(mkw_voicechat_core_stage3 PRIVATE
     NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(mkw_voicechat_core_stage3 PRIVATE -O2 -w -pipe)
+add_subdirectory(third_party/rnnoise)
+
 target_link_libraries(mkw_voicechat_core_stage3 PUBLIC
+    mkwvc_rnnoise
     Opus::opus
     mkwvc_speexdsp
     LibDataChannel::LibDataChannelStatic
@@ -168,3 +171,4 @@ target_link_libraries(mkw_voicechat_core_stage3 PUBLIC
 set_target_properties(mkw_voicechat_core_stage3 PROPERTIES
     UNITY_BUILD OFF
     CXX_EXTENSIONS OFF)
+

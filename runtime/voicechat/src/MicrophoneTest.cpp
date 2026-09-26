@@ -122,6 +122,7 @@ void MicrophoneTest::loop() {
             samples,
             microphoneGain_.load(std::memory_order_relaxed)*BaseMicrophoneGain,
             microphoneLimiterGain);
+        processor_.processPostGainSuppression(samples);
         micPeak_.store(peakOf(samples),std::memory_order_relaxed);
 
         if(monitorEnabled_.load(std::memory_order_relaxed)) {
@@ -137,3 +138,4 @@ void MicrophoneTest::loop() {
 }
 
 }
+

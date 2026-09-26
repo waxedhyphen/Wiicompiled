@@ -32,6 +32,7 @@ public:
     void setSettings(const AudioProcessingSettings& settings);
     AudioProcessingSettings settings() const;
     void processCapture(std::span<std::int16_t> samples);
+    void processPostGainSuppression(std::span<std::int16_t> samples);
 
 private:
     class Impl;
@@ -39,3 +40,4 @@ private:
 };
 
 }
+

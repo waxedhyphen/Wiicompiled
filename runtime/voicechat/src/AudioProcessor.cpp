@@ -1,12 +1,10 @@
 #include "mkwvc/AudioProcessor.hpp"
 
-#include <speex/speex_preprocess.h>
-
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <rnnoise.h>
 #include <mutex>
-#include <stdexcept>
 
 namespace mkwvc {
 
@@ -35,21 +33,29 @@ float gainFromDb(float db) {
     return std::pow(10.0f,db/20.0f);
 }
 
+constexpr std::size_t SuppressionFrameSamples=480;
+static_assert(VoiceFormat::SampleRate==48000);
+static_assert(VoiceFormat::FrameSamples%SuppressionFrameSamples==0);
+
+void initializeSuppression() {
+    static std::once_flag initialized;
+    std::call_once(initialized,[] {
+        std::unique_ptr<DenoiseState,decltype(&rnnoise_destroy)> state(rnnoise_create(nullptr),rnnoise_destroy);
+        std::array<float,SuppressionFrameSamples> silence{};
+        rnnoise_process_frame(state.get(),silence.data(),silence.data());
+    });
+}
+
 }
 
 class AudioProcessor::Impl {
 public:
     Impl() {
-        preprocess_=speex_preprocess_state_init(
-            static_cast<int>(VoiceFormat::FrameSamples),
-            static_cast<int>(VoiceFormat::SampleRate));
-        if(!preprocess_) throw std::runtime_error("Failed to initialize microphone preprocessor");
-        applySettingsLocked();
+        initializeSuppression();
+        resetSuppressionLocked();
     }
 
-    ~Impl() {
-        if(preprocess_) speex_preprocess_state_destroy(preprocess_);
-    }
+    ~Impl()=default;
 
     void setSettings(const AudioProcessingSettings& settings) {
         std::scoped_lock lock(mutex_);
@@ -60,7 +66,16 @@ public:
         next.compressorStrength=std::clamp(next.compressorStrength,0,100);
         if(next==settings_) return;
 
+        const bool suppressionWasActive=
+            settings_.noiseSuppression &&
+            settings_.noiseSuppressionStrength>0;
+        const bool suppressionWillBeActive=
+            next.noiseSuppression &&
+            next.noiseSuppressionStrength>0;
         settings_=next;
+        if(suppressionWasActive!=suppressionWillBeActive) {
+            resetSuppressionLocked();
+        }
         if(!settings_.normalization) normalizationGain_=1.0f;
         if(!settings_.noiseGate || settings_.noiseGateThreshold==0) {
             gateGain_=1.0f;
@@ -71,7 +86,6 @@ public:
             compressorEnvelope_=0.0f;
             compressorGain_=1.0f;
         }
-        applySettingsLocked();
     }
 
     AudioProcessingSettings settings() const {
@@ -83,10 +97,6 @@ public:
         if(samples.size()!=VoiceFormat::FrameSamples) return;
 
         std::scoped_lock lock(mutex_);
-
-        if(settings_.noiseSuppression && settings_.noiseSuppressionStrength>0) {
-            speex_preprocess_run(preprocess_,samples.data());
-        }
 
         if(settings_.normalization) {
             const float rms=rmsOf(samples);
@@ -134,9 +144,11 @@ public:
             normalizationGain_=1.0f;
         }
 
+        const float gateDetectorRms=rmsOf(samples);
+
         if(settings_.noiseGate && settings_.noiseGateThreshold>0) {
             const float strength=static_cast<float>(settings_.noiseGateThreshold)/100.0f;
-            const float rms=rmsOf(samples);
+            const float rms=gateDetectorRms;
             const float openThreshold=
                 4.0f+std::pow(strength,2.2f)*2200.0f;
             const float closeThreshold=openThreshold*0.60f;
@@ -244,27 +256,43 @@ public:
         }
     }
 
-private:
-    void applySettingsLocked() {
-        const bool suppressionActive=
-            settings_.noiseSuppression &&
-            settings_.noiseSuppressionStrength>0;
-        int denoise=suppressionActive ? 1 : 0;
-        int agc=0;
-        const float strength=
-            static_cast<float>(settings_.noiseSuppressionStrength)/100.0f;
-        int noiseSuppress=
-            -static_cast<int>(std::lround(
-                1.0f+11.0f*std::pow(strength,1.25f)));
+    void processPostGainSuppression(std::span<std::int16_t> samples) {
+        if(samples.size()!=VoiceFormat::FrameSamples) return;
 
-        speex_preprocess_ctl(preprocess_,SPEEX_PREPROCESS_SET_DENOISE,&denoise);
-        speex_preprocess_ctl(preprocess_,SPEEX_PREPROCESS_SET_AGC,&agc);
-        speex_preprocess_ctl(preprocess_,SPEEX_PREPROCESS_SET_NOISE_SUPPRESS,&noiseSuppress);
+        std::scoped_lock lock(mutex_);
+        if(!settings_.noiseSuppression || settings_.noiseSuppressionStrength<=0) {
+            return;
+        }
+
+        const float targetMix=static_cast<float>(settings_.noiseSuppressionStrength)/100.0f;
+        for(std::size_t offset=0;offset<samples.size();offset+=SuppressionFrameSamples) {
+            std::array<float,SuppressionFrameSamples> input{};
+            std::array<float,SuppressionFrameSamples> output{};
+            for(std::size_t i=0;i<SuppressionFrameSamples;++i) input[i]=static_cast<float>(samples[offset+i]);
+            rnnoise_process_frame(denoiser_.get(),output.data(),input.data());
+            for(std::size_t i=0;i<SuppressionFrameSamples;++i) {
+                const float mix=suppressionMix_+(targetMix-suppressionMix_)*static_cast<float>(i+1)/static_cast<float>(SuppressionFrameSamples);
+                const float value=suppressionDry_[i]+mix*(output[i]-suppressionDry_[i]);
+                samples[offset+i]=static_cast<std::int16_t>(std::clamp(std::lround(value),-32768L,32767L));
+            }
+            std::copy_n(suppressionDry_.begin()+SuppressionFrameSamples,SuppressionFrameSamples,suppressionDry_.begin());
+            std::copy(input.begin(),input.end(),suppressionDry_.begin()+SuppressionFrameSamples);
+            suppressionMix_=targetMix;
+        }
+    }
+
+private:
+    void resetSuppressionLocked() {
+        denoiser_.reset(rnnoise_create(nullptr));
+        suppressionDry_.fill(0.0f);
+        suppressionMix_=static_cast<float>(settings_.noiseSuppressionStrength)/100.0f;
     }
 
     mutable std::mutex mutex_;
     AudioProcessingSettings settings_{};
-    SpeexPreprocessState* preprocess_=nullptr;
+    std::unique_ptr<DenoiseState,decltype(&rnnoise_destroy)> denoiser_{nullptr,rnnoise_destroy};
+    std::array<float,SuppressionFrameSamples*2> suppressionDry_{};
+    float suppressionMix_=0.0f;
     float normalizationGain_=1.0f;
     float gateGain_=1.0f;
     bool gateOpen_=true;
@@ -278,5 +306,7 @@ AudioProcessor::~AudioProcessor()=default;
 void AudioProcessor::setSettings(const AudioProcessingSettings& settings){impl_->setSettings(settings);}
 AudioProcessingSettings AudioProcessor::settings() const{return impl_->settings();}
 void AudioProcessor::processCapture(std::span<std::int16_t> samples){impl_->processCapture(samples);}
+void AudioProcessor::processPostGainSuppression(std::span<std::int16_t> samples){impl_->processPostGainSuppression(samples);}
 
 }
+

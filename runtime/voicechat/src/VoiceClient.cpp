@@ -538,6 +538,7 @@ void VoiceClient::senderLoop() {
 
             const auto gain=microphoneGain_.load(std::memory_order_relaxed)*BaseMicrophoneGain;
             applyGainWithLimiter(samples,gain,microphoneLimiterGain);
+            processor_.processPostGainSuppression(samples);
 
             const bool microphoneTest=microphoneTestEnabled_.load(std::memory_order_relaxed);
             const auto processedPeak=peakOf(samples);
@@ -851,3 +852,4 @@ void VoiceClient::mixerLoop() {
 }
 
 }
+
