@@ -937,7 +937,8 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
                     state.status.localMemberId.clear();
                     try {
                         state.signaling->admitRetroRewindDevelopment(
-                            input.profileId);
+                            input.profileId,
+                            input.roomProfileIds);
                         state.status.developmentAdmissionPending=true;
                         state.status.status=
                             "Requesting UNVERIFIED public-roster admission...";
@@ -1025,6 +1026,15 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
                         player->voiceChat=true;
                         if(!metadata.displayName.empty()) player->displayName=metadata.displayName;
                         if(!metadata.friendCode.empty()) player->friendCode=metadata.friendCode;
+                    } else {
+                        EmbeddedVoiceRoomPlayer player;
+                        player.profileId=metadata.participantId;
+                        player.displayName=metadata.displayName.empty()
+                            ? metadata.participantId
+                            : metadata.displayName;
+                        player.friendCode=metadata.friendCode;
+                        player.voiceChat=true;
+                        state.status.roomPlayers.push_back(std::move(player));
                     }
                     state.developmentPeers[memberId]=std::move(metadata);
                     applyRemoteVolumeForMember(state,memberId);
