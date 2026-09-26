@@ -367,6 +367,64 @@ bool ReadRkNetRoomState(RkNetRoomState& result) noexcept {
     }
 }
 
+std::vector<std::string> ReadRoomProfileIds(
+    const std::string& localProfileId,
+    bool localRoomActive) noexcept {
+    std::vector<std::string> result;
+    if(!localRoomActive) return result;
+
+    try {
+        RkNetRoomState room;
+        if(!ReadRkNetRoomState(room)) return result;
+
+        std::array<bool,12> activeAids{};
+        for(std::uint32_t player=0;player<12;++player) {
+            const std::uint8_t aid=
+                Memory::Read8(
+                    room.controller+kControllerPlayerAidMap+player);
+            if(aid<12 && (room.availableAids&(1u<<aid))!=0) {
+                activeAids[aid]=true;
+            }
+        }
+
+        std::unordered_set<std::string> profiles;
+        if(!localProfileId.empty()) profiles.insert(localProfileId);
+
+        if(Memory::Contains(kDwcMatchControlInstance,4)) {
+            const std::uint32_t matchControl=
+                Memory::Read32(kDwcMatchControlInstance);
+            if(matchControl!=0 &&
+               Memory::Contains(
+                   matchControl+kDwcMatchNodes,
+                   kDwcNodeSize*kDwcNodeCount)) {
+                for(std::uint32_t i=0;i<kDwcNodeCount;++i) {
+                    const std::uint32_t node=
+                        matchControl+kDwcMatchNodes+i*kDwcNodeSize;
+                    const std::uint32_t pid=
+                        Memory::Read32(node+kDwcNodePid);
+                    const std::uint8_t aid=
+                        Memory::Read8(node+kDwcNodeAid);
+                    if(pid==0 ||
+                       aid>=12 ||
+                       (room.availableAids&(1u<<aid))==0 ||
+                       !activeAids[aid]) {
+                        continue;
+                    }
+                    profiles.insert(std::to_string(pid));
+                }
+            }
+        }
+
+        result.assign(profiles.begin(),profiles.end());
+        std::sort(result.begin(),result.end());
+    } catch(...) {
+        result.clear();
+        if(!localProfileId.empty()) result.push_back(localProfileId);
+    }
+
+    return result;
+}
+
 bool ReadRoomSectionPacket(const RkNetRoomState& room,
                            std::uint8_t aid,
                            bool received,
@@ -1389,6 +1447,8 @@ void ServiceRoomLookup() noexcept {
         voiceInput.sessionKey=identity.sessionKey;
         voiceInput.gameName=identity.gameName;
         voiceInput.friendProfileIds=ReadFriendProfileIds();
+        voiceInput.roomProfileIds=
+            ReadRoomProfileIds(identity.profileId,localRoomActive);
         voiceInput.teamModeActive=teams.active;
         voiceInput.teamProfileIds=teams.knownProfileIds;
         voiceInput.teammateProfileIds=teams.teammateProfileIds;
