@@ -83,6 +83,8 @@ struct EmbeddedVoicePeerControl {
 
 struct EmbeddedVoiceControls {
     bool enabled = false;
+    bool runtimeBlocked = false;
+    std::string runtimeBlockReason;
     bool overlayVisible = true;
     bool localStatusOverlayVisible = true;
     bool playerSpeakersOverlayVisible = true;
@@ -132,6 +134,7 @@ EmbeddedCoreStatus embeddedCoreStatus() noexcept;
 void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcept;
 EmbeddedVoiceSessionStatus embeddedVoiceSessionStatus();
 EmbeddedVoiceControls embeddedVoiceControls();
+void setEmbeddedVoiceRuntimeBlocked(bool blocked,std::string reason);
 void setEmbeddedVoiceEnabled(bool enabled);
 void setEmbeddedVoiceOverlayVisible(bool visible);
 void setEmbeddedVoiceOverlayOptions(bool localStatusVisible,bool playerSpeakersVisible,float playerSpeakerBackgroundTransparency);
