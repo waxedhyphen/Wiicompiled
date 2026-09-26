@@ -25,6 +25,16 @@ float peakOf(std::span<const std::int16_t> samples) {
     return peak;
 }
 
+float smoothingCoefficient(float milliseconds) {
+    if(milliseconds<=0.0f) return 1.0f;
+    const float samples=milliseconds*0.001f*static_cast<float>(VoiceFormat::SampleRate);
+    return 1.0f-std::exp(-1.0f/std::max(samples,1.0f));
+}
+
+float gainFromDb(float db) {
+    return std::pow(10.0f,db/20.0f);
+}
+
 }
 
 class AudioProcessor::Impl {
@@ -49,10 +59,18 @@ public:
         next.microphoneBoost=std::clamp(next.microphoneBoost,1.0f,3.0f);
         next.compressorStrength=std::clamp(next.compressorStrength,0,100);
         if(next==settings_) return;
+
         settings_=next;
-        normalizationGain_=1.0f;
-        gateGain_=1.0f;
-        gateOpen_=true;
+        if(!settings_.normalization) normalizationGain_=1.0f;
+        if(!settings_.noiseGate || settings_.noiseGateThreshold==0) {
+            gateGain_=1.0f;
+            gateOpen_=true;
+            gateHoldFrames_=0;
+        }
+        if(!settings_.compressor || settings_.compressorStrength==0) {
+            compressorEnvelope_=0.0f;
+            compressorGain_=1.0f;
+        }
         applySettingsLocked();
     }
 
@@ -65,31 +83,62 @@ public:
         if(samples.size()!=VoiceFormat::FrameSamples) return;
 
         std::scoped_lock lock(mutex_);
-        if(settings_.noiseSuppression) speex_preprocess_run(preprocess_,samples.data());
 
-        if(settings_.noiseGate) {
+        if(settings_.noiseSuppression && settings_.noiseSuppressionStrength>0) {
+            std::array<std::int16_t,VoiceFormat::FrameSamples> dry{};
+            std::copy(samples.begin(),samples.end(),dry.begin());
+            speex_preprocess_run(preprocess_,samples.data());
+
+            const float strength=static_cast<float>(settings_.noiseSuppressionStrength)/100.0f;
+            const float wet=0.85f*strength;
+            const float dryMix=1.0f-wet;
+            for(std::size_t i=0;i<samples.size();++i) {
+                const float mixed=
+                    static_cast<float>(dry[i])*dryMix+
+                    static_cast<float>(samples[i])*wet;
+                samples[i]=static_cast<std::int16_t>(std::clamp(
+                    static_cast<std::int32_t>(std::lround(mixed)),
+                    -32768,
+                    32767));
+            }
+        }
+
+        if(settings_.noiseGate && settings_.noiseGateThreshold>0) {
+            const float strength=static_cast<float>(settings_.noiseGateThreshold)/100.0f;
             const float rms=rmsOf(samples);
-            const float openThreshold=120.0f+static_cast<float>(settings_.noiseGateThreshold)*32.0f;
-            const float closeThreshold=openThreshold*0.72f;
+            const float openThreshold=
+                120.0f+std::pow(strength,1.35f)*2800.0f;
+            const float closeThreshold=openThreshold*0.68f;
+
             if(gateOpen_) {
-                if(rms<closeThreshold) gateOpen_=false;
+                if(rms>=closeThreshold) {
+                    gateHoldFrames_=3;
+                } else if(gateHoldFrames_>0) {
+                    --gateHoldFrames_;
+                } else {
+                    gateOpen_=false;
+                }
             } else if(rms>=openThreshold) {
                 gateOpen_=true;
+                gateHoldFrames_=3;
             }
 
             const float target=gateOpen_ ? 1.0f : 0.0f;
-            const float speed=gateOpen_ ? 0.55f : 0.28f;
-            gateGain_+=(target-gateGain_)*speed;
-            if(gateGain_<0.001f) {
-                std::fill(samples.begin(),samples.end(),0);
-            } else if(gateGain_<0.999f) {
-                for(auto& sample:samples) {
-                    sample=static_cast<std::int16_t>(std::lround(static_cast<float>(sample)*gateGain_));
-                }
+            const float attack=smoothingCoefficient(4.0f);
+            const float release=smoothingCoefficient(90.0f);
+            for(auto& sample:samples) {
+                const float coefficient=target>gateGain_ ? attack : release;
+                gateGain_+=(target-gateGain_)*coefficient;
+                sample=static_cast<std::int16_t>(std::clamp(
+                    static_cast<std::int32_t>(
+                        std::lround(static_cast<float>(sample)*gateGain_)),
+                    -32768,
+                    32767));
             }
         } else {
             gateGain_=1.0f;
             gateOpen_=true;
+            gateHoldFrames_=0;
         }
 
         if(settings_.normalization) {
@@ -139,42 +188,88 @@ public:
         }
 
         const float boost=settings_.microphoneBoost;
-        const bool compress=settings_.compressor && settings_.compressorStrength>0;
-        const float threshold=std::clamp(
-            14500.0f-static_cast<float>(settings_.compressorStrength)*65.0f,
-            6500.0f,
-            14500.0f);
-        const float ratio=1.0f+static_cast<float>(settings_.compressorStrength)*0.07f;
-
+        const bool compress=
+            settings_.compressor &&
+            settings_.compressorStrength>0;
         if(boost!=1.0f || compress) {
+            const float strength=
+                static_cast<float>(settings_.compressorStrength)/100.0f;
+            const float thresholdDb=-10.0f-20.0f*strength;
+            const float threshold=
+                32768.0f*gainFromDb(thresholdDb);
+            const float ratio=1.0f+7.0f*strength;
+            const float makeup=gainFromDb(6.0f*strength);
+            const float envelopeAttack=smoothingCoefficient(4.0f);
+            const float envelopeRelease=smoothingCoefficient(120.0f);
+            const float gainAttack=smoothingCoefficient(8.0f);
+            const float gainRelease=smoothingCoefficient(140.0f);
+
             std::array<float,VoiceFormat::FrameSamples> dynamics{};
             float dynamicsPeak=0.0f;
             for(std::size_t i=0;i<samples.size();++i) {
                 float value=static_cast<float>(samples[i])*boost;
+
                 if(compress) {
-                    const float sign=value<0.0f ? -1.0f : 1.0f;
-                    float magnitude=std::abs(value);
-                    if(magnitude>threshold) magnitude=threshold+(magnitude-threshold)/ratio;
-                    value=sign*magnitude;
+                    const float magnitude=std::abs(value);
+                    const float envelopeCoefficient=
+                        magnitude>compressorEnvelope_
+                            ? envelopeAttack
+                            : envelopeRelease;
+                    compressorEnvelope_+=
+                        (magnitude-compressorEnvelope_)*envelopeCoefficient;
+
+                    float targetGain=1.0f;
+                    if(compressorEnvelope_>threshold) {
+                        const float compressedEnvelope=
+                            threshold*std::pow(
+                                compressorEnvelope_/threshold,
+                                1.0f/ratio);
+                        targetGain=
+                            compressedEnvelope/
+                            std::max(compressorEnvelope_,1.0f);
+                    }
+
+                    const float gainCoefficient=
+                        targetGain<compressorGain_
+                            ? gainAttack
+                            : gainRelease;
+                    compressorGain_+=
+                        (targetGain-compressorGain_)*gainCoefficient;
+                    value*=compressorGain_*makeup;
                 }
+
                 dynamics[i]=value;
                 dynamicsPeak=std::max(dynamicsPeak,std::abs(value));
             }
 
             constexpr float dynamicsCeiling=30000.0f;
-            const float limiter=dynamicsPeak>dynamicsCeiling ? dynamicsCeiling/dynamicsPeak : 1.0f;
+            const float limiter=
+                dynamicsPeak>dynamicsCeiling
+                    ? dynamicsCeiling/dynamicsPeak
+                    : 1.0f;
             for(std::size_t i=0;i<samples.size();++i) {
-                const auto value=static_cast<std::int32_t>(std::lround(dynamics[i]*limiter));
-                samples[i]=static_cast<std::int16_t>(std::clamp(value,-32768,32767));
+                const auto value=static_cast<std::int32_t>(
+                    std::lround(dynamics[i]*limiter));
+                samples[i]=static_cast<std::int16_t>(
+                    std::clamp(value,-32768,32767));
             }
+        } else {
+            compressorEnvelope_=0.0f;
+            compressorGain_=1.0f;
         }
     }
 
 private:
     void applySettingsLocked() {
-        int denoise=settings_.noiseSuppression ? 1 : 0;
+        const bool suppressionActive=
+            settings_.noiseSuppression &&
+            settings_.noiseSuppressionStrength>0;
+        int denoise=suppressionActive ? 1 : 0;
         int agc=0;
-        int noiseSuppress=-(5+(settings_.noiseSuppressionStrength*35)/100);
+        const float strength=
+            static_cast<float>(settings_.noiseSuppressionStrength)/100.0f;
+        int noiseSuppress=
+            -static_cast<int>(std::lround(3.0f+21.0f*strength));
 
         speex_preprocess_ctl(preprocess_,SPEEX_PREPROCESS_SET_DENOISE,&denoise);
         speex_preprocess_ctl(preprocess_,SPEEX_PREPROCESS_SET_AGC,&agc);
@@ -187,6 +282,9 @@ private:
     float normalizationGain_=1.0f;
     float gateGain_=1.0f;
     bool gateOpen_=true;
+    int gateHoldFrames_=0;
+    float compressorEnvelope_=0.0f;
+    float compressorGain_=1.0f;
 };
 
 AudioProcessor::AudioProcessor():impl_(std::make_unique<Impl>()) {}
