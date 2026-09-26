@@ -377,16 +377,6 @@ std::vector<std::string> ReadRoomProfileIds(
         RkNetRoomState room;
         if(!ReadRkNetRoomState(room)) return result;
 
-        std::array<bool,12> activeAids{};
-        for(std::uint32_t player=0;player<12;++player) {
-            const std::uint8_t aid=
-                Memory::Read8(
-                    room.controller+kControllerPlayerAidMap+player);
-            if(aid<12 && (room.availableAids&(1u<<aid))!=0) {
-                activeAids[aid]=true;
-            }
-        }
-
         std::unordered_set<std::string> profiles;
         if(!localProfileId.empty()) profiles.insert(localProfileId);
 
@@ -406,8 +396,7 @@ std::vector<std::string> ReadRoomProfileIds(
                         Memory::Read8(node+kDwcNodeAid);
                     if(pid==0 ||
                        aid>=12 ||
-                       (room.availableAids&(1u<<aid))==0 ||
-                       !activeAids[aid]) {
+                       (room.availableAids&(1u<<aid))==0) {
                         continue;
                     }
                     profiles.insert(std::to_string(pid));
