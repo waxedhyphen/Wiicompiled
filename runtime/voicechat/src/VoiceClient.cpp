@@ -115,27 +115,12 @@ float softLimit(float value) {
 
 void applyGainWithLimiter(std::span<std::int16_t> samples,float gain,float& limiterGain) {
     gain=std::max(0.0f,gain);
-    float peak=0.0f;
-    for(const auto sample:samples) peak=std::max(peak,std::abs(static_cast<float>(sample))*gain);
-
-    constexpr float ceiling=30000.0f;
-    const float desired=peak>ceiling ? ceiling/peak : 1.0f;
-    const float previous=limiterGain;
-    const float target=desired<previous
-        ? desired
-        : previous+(desired-previous)*0.04f;
-
-    const float denominator=samples.size()>1
-        ? static_cast<float>(samples.size()-1)
-        : 1.0f;
-    for(std::size_t i=0;i<samples.size();++i) {
-        const float t=static_cast<float>(i)/denominator;
-        const float smoothGain=previous+(target-previous)*t;
-        const float value=softLimit(static_cast<float>(samples[i])*gain*smoothGain);
-        samples[i]=static_cast<std::int16_t>(std::clamp(
+    for(auto& sample:samples) {
+        const float value=softLimit(static_cast<float>(sample)*gain);
+        sample=static_cast<std::int16_t>(std::clamp(
             static_cast<std::int32_t>(std::lround(value)),-32768,32767));
     }
-    limiterGain=std::clamp(target,0.0f,1.0f);
+    limiterGain=1.0f;
 }
 
 }
@@ -821,7 +806,6 @@ void VoiceClient::receiverLoop(const std::shared_ptr<PeerState>& peer) {
 
 void VoiceClient::mixerLoop() {
     auto nextMix=std::chrono::steady_clock::now();
-    float limiterGain=1.0f;
 
     while(running_.load(std::memory_order_relaxed)) {
         nextMix+=std::chrono::milliseconds(VoiceFormat::FrameDurationMs);
@@ -837,46 +821,32 @@ void VoiceClient::mixerLoop() {
 
             anyFrame=true;
             const auto volume=peer->volume.load(std::memory_order_relaxed);
-            for(std::size_t i=0;i<frame.size();++i) mixed[i]+=static_cast<float>(frame[i])*volume;
+            for(std::size_t i=0;i<frame.size();++i) {
+                mixed[i]+=static_cast<float>(frame[i])*volume;
+            }
         }
 
-        if(deafened_.load(std::memory_order_relaxed)) {
-            playbackPeak_.store(0,std::memory_order_relaxed);
-        } else if(anyFrame) {
-            PcmFrame output{};
+        PcmFrame output{};
+        if(!deafened_.load(std::memory_order_relaxed) && anyFrame) {
             const auto globalVolume=
                 playbackVolume_.load(std::memory_order_relaxed)*BasePlaybackGain;
-            float peak=0.0f;
-            for(const auto sample:mixed) peak=std::max(peak,std::abs(sample*globalVolume));
-
-            constexpr float ceiling=30000.0f;
-            const float desired=peak>ceiling ? ceiling/peak : 1.0f;
-            const float previous=limiterGain;
-            const float target=desired<previous
-                ? desired
-                : previous+(desired-previous)*0.035f;
-            const float denominator=output.size()>1
-                ? static_cast<float>(output.size()-1)
-                : 1.0f;
             for(std::size_t i=0;i<output.size();++i) {
-                const float t=static_cast<float>(i)/denominator;
-                const float smoothGain=previous+(target-previous)*t;
-                const float value=softLimit(mixed[i]*globalVolume*smoothGain);
+                const float value=softLimit(mixed[i]*globalVolume);
                 output[i]=static_cast<std::int16_t>(std::clamp(
                     static_cast<std::int32_t>(std::lround(value)),-32768,32767));
             }
-            limiterGain=std::clamp(target,0.0f,1.0f);
-
             playbackPeak_.store(peakOf(output),std::memory_order_relaxed);
-            audio_.queuePlayback(std::span<const std::int16_t>(output));
         } else {
             playbackPeak_.store(0,std::memory_order_relaxed);
-            limiterGain+=(1.0f-limiterGain)*0.05f;
         }
+
+        audio_.queuePlayback(std::span<const std::int16_t>(output));
 
         std::this_thread::sleep_until(nextMix);
         const auto now=std::chrono::steady_clock::now();
-        if(nextMix+std::chrono::milliseconds(VoiceFormat::FrameDurationMs*4)<now) nextMix=now;
+        if(nextMix+std::chrono::milliseconds(VoiceFormat::FrameDurationMs*4)<now) {
+            nextMix=now;
+        }
     }
 }
 
