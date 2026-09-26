@@ -1058,7 +1058,7 @@ void ServiceVoiceHotkeys() {
     static bool previousMute=false;
     static bool previousDeafen=false;
 
-    if(!controls.enabled) {
+    if(!controls.enabled || controls.runtimeBlocked) {
         previousMute=false;
         previousDeafen=false;
         mkwvc::setEmbeddedVoiceHotkeyState(false,false);
@@ -1083,9 +1083,15 @@ void ServiceVoiceHotkeys() {
 
 void DrawVoiceChatOverlay() {
     auto controls=mkwvc::embeddedVoiceControls();
-    if(!controls.enabled ||
-       (!controls.localStatusOverlayVisible &&
-        !controls.playerSpeakersOverlayVisible)) {
+    const auto release=RetroRewindVoiceBridge::Release();
+    const bool updateRequired=
+        release.checkComplete &&
+        release.updateAvailable;
+
+    if(!updateRequired &&
+       (!controls.enabled ||
+        (!controls.localStatusOverlayVisible &&
+         !controls.playerSpeakersOverlayVisible))) {
         return;
     }
 
@@ -1093,7 +1099,9 @@ void DrawVoiceChatOverlay() {
     ImGuiViewport* viewport=ImGui::GetMainViewport();
     if(!viewport) return;
 
-    if(controls.playerSpeakersOverlayVisible && !controls.peers.empty()) {
+    if(!updateRequired &&
+       controls.playerSpeakersOverlayVisible &&
+       !controls.peers.empty()) {
         ImGui::SetNextWindowPos(
             ImVec2(
                 viewport->WorkPos.x+viewport->WorkSize.x-12.0f,
@@ -1177,10 +1185,11 @@ void DrawVoiceChatOverlay() {
         ImGui::PopStyleVar(2);
     }
 
-    if(!controls.localStatusOverlayVisible) return;
+    if(!updateRequired && !controls.localStatusOverlayVisible) return;
 
     std::string status;
-    if(controls.deafened) status="DEAFENED";
+    if(updateRequired) status="UPDATE REQUIRED";
+    else if(controls.deafened) status="DEAFENED";
     else if(controls.microphoneMuted) status="MUTED";
     else if(controls.pushToMute && controls.pushToMuteHeld) status="PUSH-TO-MUTE";
     else if(controls.localSpeaking) status="SPEAKING";
@@ -1193,12 +1202,20 @@ void DrawVoiceChatOverlay() {
                viewport->WorkPos.y+viewport->WorkSize.y-18.0f),
         ImGuiCond_Always,
         ImVec2(1.0f,1.0f));
-    ImGui::SetNextWindowBgAlpha(0.78f);
+    ImGui::SetNextWindowBgAlpha(updateRequired ? 1.0f : 0.78f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(12.0f,8.0f));
+
     const bool alert=controls.microphoneMuted || controls.deafened;
-    if(alert) {
-        ImGui::PushStyleColor(ImGuiCol_WindowBg,ImVec4(0.55f,0.05f,0.05f,0.92f));
+    if(updateRequired) {
+        ImGui::PushStyleColor(
+            ImGuiCol_WindowBg,
+            ImVec4(0.62f,0.43f,0.02f,1.0f));
+    } else if(alert) {
+        ImGui::PushStyleColor(
+            ImGuiCol_WindowBg,
+            ImVec4(0.55f,0.05f,0.05f,0.92f));
     }
+
     const ImGuiWindowFlags localFlags=
         ImGuiWindowFlags_NoDecoration|
         ImGuiWindowFlags_AlwaysAutoResize|
@@ -1210,22 +1227,112 @@ void DrawVoiceChatOverlay() {
         ImGui::SetWindowFontScale(1.55f);
         ImGui::TextUnformatted(status.c_str());
         ImGui::SetWindowFontScale(1.05f);
-        ImGui::TextDisabled("%s",
-            session.signalingConnected ? "Voice connected" : "Voice waiting");
+        if(updateRequired) {
+            ImGui::TextUnformatted("Voice Chat disabled until updated");
+        } else {
+            ImGui::TextDisabled("%s",
+                session.signalingConnected ? "Voice connected" : "Voice waiting");
+        }
         ImGui::SetWindowFontScale(1.0f);
     }
     ImGui::End();
-    if(alert) ImGui::PopStyleColor();
+    if(updateRequired || alert) ImGui::PopStyleColor();
     ImGui::PopStyleVar();
 }
 
 void DrawVoiceChatSettings() {
     auto controls=mkwvc::embeddedVoiceControls();
+    const auto release=RetroRewindVoiceBridge::Release();
+    const bool updateRequired=
+        release.checkComplete &&
+        release.updateAvailable;
 
     bool enabled=controls.enabled;
+    ImGui::BeginDisabled(controls.runtimeBlocked);
     if(ImGui::Checkbox("Enabled",&enabled)) {
         mkwvc::setEmbeddedVoiceEnabled(enabled);
         controls=mkwvc::embeddedVoiceControls();
+    }
+    ImGui::EndDisabled();
+
+    ImGui::TextUnformatted("Retro Rewind voice integration");
+    ImGui::TextDisabled(
+        "MKW Voice Chat %s | Integration: %s",
+        RetroRewindVoiceBridge::kMkwVoiceChatVersion,
+        RetroRewindVoiceBridge::kMkwVoiceChatPatchRevision);
+    ImGui::Text(
+        "Update status: %s",
+        release.status.empty() ? "Checking..." : release.status.c_str());
+
+    if(updateRequired) {
+        ImGui::SeparatorText("Update required");
+        ImGui::PushStyleColor(
+            ImGuiCol_Text,
+            ImVec4(1.0f,0.82f,0.18f,1.0f));
+
+        if(release.productUpdateRequired) {
+            ImGui::TextUnformatted("MKW VOICE CHAT UPDATE REQUIRED");
+            ImGui::Text(
+                "Installed: %s",
+                RetroRewindVoiceBridge::kMkwVoiceChatVersion);
+            ImGui::Text(
+                "Latest: %s",
+                release.latestVersion.empty()
+                    ? "unknown"
+                    : release.latestVersion.c_str());
+        }
+
+        if(release.integrationUpdateRequired) {
+            ImGui::TextUnformatted("MKW VOICE CHAT INTEGRATION UPDATE REQUIRED");
+            ImGui::TextWrapped(
+                "Installed integration: %s",
+                RetroRewindVoiceBridge::kMkwVoiceChatPatchRevision);
+            ImGui::TextWrapped(
+                "Latest integration: %s",
+                release.latestPatchRevision.empty()
+                    ? "unknown"
+                    : release.latestPatchRevision.c_str());
+        }
+
+        if(release.wiiCompiledUpdateRequired) {
+            ImGui::TextUnformatted("WIICOMPILED UPDATE REQUIRED");
+            ImGui::Text(
+                "Installed base: %s",
+                RetroRewindVoiceBridge::kMkwVoiceChatWiiCompiledVersion);
+            ImGui::Text(
+                "Required base: %s",
+                release.requiredWiiCompiledVersion.empty()
+                    ? "unknown"
+                    : release.requiredWiiCompiledVersion.c_str());
+        }
+
+        if(release.protocolUpdateRequired) {
+            ImGui::TextUnformatted("VOICE CHAT PROTOCOL UPDATE REQUIRED");
+            ImGui::Text(
+                "Installed protocol: %u",
+                RetroRewindVoiceBridge::kMkwVoiceChatProtocolVersion);
+            ImGui::Text(
+                "Required protocol: %u",
+                release.minimumProtocol);
+        }
+
+        ImGui::TextWrapped(
+            "Voice Chat has been disabled for this process until MKW Voice Chat is updated. Your saved Enabled setting was not changed.");
+        ImGui::PopStyleColor();
+
+        if(ImGui::Button("Update MKW Voice Chat")) {
+            RetroRewindVoiceBridge::LaunchInstalledUpdater();
+        }
+        return;
+    }
+
+    if(controls.runtimeBlocked) {
+        ImGui::TextWrapped(
+            "%s",
+            controls.runtimeBlockReason.empty()
+                ? "Voice Chat is temporarily unavailable."
+                : controls.runtimeBlockReason.c_str());
+        return;
     }
 
     if(!controls.enabled) {
@@ -1253,28 +1360,6 @@ void DrawVoiceChatSettings() {
         }
         return std::string();
     };
-
-    ImGui::TextUnformatted("Retro Rewind voice integration");
-    const auto release=RetroRewindVoiceBridge::Release();
-    ImGui::TextDisabled(
-        "MKW Voice Chat %s | Integration: %s",
-        RetroRewindVoiceBridge::kMkwVoiceChatVersion,
-        RetroRewindVoiceBridge::kMkwVoiceChatPatchRevision);
-    ImGui::Text(
-        "Update status: %s",
-        release.status.empty() ? "Checking..." : release.status.c_str());
-    if(!release.latestVersion.empty()) {
-        ImGui::TextDisabled(
-            "Latest release: %s",
-            release.latestVersion.c_str());
-    }
-    if(release.updateAvailable || release.protocolUpdateRequired) {
-        if(ImGui::Button("Update MKW Voice Chat")) {
-            RetroRewindVoiceBridge::LaunchInstalledUpdater();
-        }
-        ImGui::SameLine();
-        ImGui::TextDisabled("Close the game after starting the updater.");
-    }
 
     const std::string localName=playerNameFor(identity.profileId);
     const std::string localFriendCode=playerFriendCodeFor(identity.profileId);
