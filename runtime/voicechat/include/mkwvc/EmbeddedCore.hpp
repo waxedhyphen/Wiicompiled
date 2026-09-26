@@ -79,6 +79,9 @@ struct EmbeddedVoicePeerControl {
 struct EmbeddedVoiceControls {
     bool enabled = false;
     bool overlayVisible = true;
+    bool localStatusOverlayVisible = true;
+    bool playerSpeakersOverlayVisible = true;
+    float playerSpeakerBackgroundTransparency = 0.30f;
     bool muteEveryone = false;
     bool muteOnlyFriends = false;
     bool muteEveryoneButFriends = false;
@@ -123,6 +126,7 @@ EmbeddedVoiceSessionStatus embeddedVoiceSessionStatus();
 EmbeddedVoiceControls embeddedVoiceControls();
 void setEmbeddedVoiceEnabled(bool enabled);
 void setEmbeddedVoiceOverlayVisible(bool visible);
+void setEmbeddedVoiceOverlayOptions(bool localStatusVisible,bool playerSpeakersVisible,float playerSpeakerBackgroundTransparency);
 void setEmbeddedVoiceMutePolicy(bool muteEveryone,bool muteOnlyFriends,bool muteEveryoneButFriends,bool muteNewPlayers);
 void refreshEmbeddedVoiceDevices();
 void setEmbeddedVoiceInputDevice(std::string device);
