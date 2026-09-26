@@ -15,3 +15,7 @@ set_target_properties(mkwvc_rnnoise PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED
 if(NOT MSVC)
     target_link_libraries(mkwvc_rnnoise PUBLIC m)
 endif()
+
+if(MSVC)
+    target_compile_definitions(mkwvc_rnnoise PRIVATE restrict=__restrict OPUS_X86_MAY_HAVE_SSE OPUS_X86_MAY_HAVE_SSE2)
+endif()

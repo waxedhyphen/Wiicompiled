@@ -10,3 +10,5 @@ AudioProcessor passes 48 kHz mono floating-point PCM in the original int16 ampli
 RNNoise is warmed once before microphone processing starts. Each processor owns independent recurrent state and fixed-size input/output buffers.
 
 The full quantized model comes from https://media.xiph.org/rnnoise/models/rnnoise_data-0b50c45.tar.gz (SHA-256 `4ac81c5c0884ec4bd5907026aaae16209b7b76cd9d7f71af582094a2f98f4b43`). Only the optional `#ifndef DISABLE_DEBUG_FLOAT` duplicate debugging arrays have been removed from `rnnoise_data.c`; the build defines `DISABLE_DEBUG_FLOAT` and all production model weights are unchanged. `tools/prepare_rnnoise_model.py` reproduces this transformation from the upstream model source. No other upstream runtime source is modified.
+
+`src/os_support.h` is a project compatibility shim mapping the scalar/NEON vector helper to RNNoise's existing clear macro; the upstream v0.2 release references this header without shipping it. MSVC builds select the supported x64 SSE2 path and spell C restrict as __restrict.
