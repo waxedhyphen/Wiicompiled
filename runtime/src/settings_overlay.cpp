@@ -1243,7 +1243,7 @@ void DrawVoiceChatSettings() {
     };
 
     ImGui::TextUnformatted("Retro Rewind voice integration");
-    ImGui::TextDisabled("Integration: voice-bridge-v23-overlay-buffer-audio-stage4c");
+    ImGui::TextDisabled("Integration: voice-bridge-v25-processing-dynamics-stage4c");
 
     const std::string localName=playerNameFor(identity.profileId);
     const std::string localFriendCode=playerFriendCodeFor(identity.profileId);
