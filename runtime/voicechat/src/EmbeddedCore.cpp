@@ -34,6 +34,7 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -90,6 +91,10 @@ struct EmbeddedVoiceSessionState {
     float playbackVolume=1.0f;
     bool enabled=false;
     bool overlayVisible=true;
+    bool muteEveryone=false;
+    bool muteOnlyFriends=false;
+    bool muteEveryoneButFriends=false;
+    bool muteNewPlayers=false;
     bool microphoneMuted=false;
     bool deafened=false;
     bool pushToTalk=false;
@@ -110,6 +115,8 @@ struct EmbeddedVoiceSessionState {
     std::unordered_map<std::string,EmbeddedPeerMetadata> developmentPeers;
     std::unordered_map<std::string,float> savedPeerVolumes;
     std::unordered_map<std::string,std::unique_ptr<EmbeddedPeerLink>> peerLinks;
+    std::unordered_set<std::string> friendProfileIds;
+    std::unordered_set<std::string> autoMutedNewParticipants;
     bool settingsLoaded=false;
     std::uint64_t identityGeneration = 0;
     std::chrono::steady_clock::time_point nextReconnect{};
@@ -160,6 +167,10 @@ void loadSettingsLocked(EmbeddedVoiceSessionState& state) {
             }
             if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","enabled")) state.enabled=*value;
             if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","overlay_visible")) state.overlayVisible=*value;
+            if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","mute_everyone")) state.muteEveryone=*value;
+            if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","mute_only_friends")) state.muteOnlyFriends=*value;
+            if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","mute_everyone_but_friends")) state.muteEveryoneButFriends=*value;
+            if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","mute_new_players")) state.muteNewPlayers=*value;
             if(const auto value=RuntimeConfigFile::FindConfigValue<std::string>(document,"voicechat","input_device")) state.inputDevice=*value;
             if(const auto value=RuntimeConfigFile::FindConfigValue<std::string>(document,"voicechat","output_device")) state.outputDevice=*value;
             if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","normalization")) state.audioProcessing.normalization=*value;
@@ -200,6 +211,14 @@ void loadSettingsLocked(EmbeddedVoiceSessionState& state) {
                     }
                 }
             }
+        }
+
+        if(state.muteEveryone) {
+            state.muteOnlyFriends=false;
+            state.muteEveryoneButFriends=false;
+            state.muteNewPlayers=false;
+        } else if(state.muteOnlyFriends && state.muteEveryoneButFriends) {
+            state.muteEveryoneButFriends=false;
         }
 
         if(state.pushToTalk && state.voiceActivation) state.voiceActivation=false;
@@ -250,6 +269,61 @@ mkwvc::EmbeddedVoiceRoomPlayer* roomPlayer(
         if(player.profileId==participantId) return &player;
     }
     return nullptr;
+}
+
+bool isFriendProfile(
+    const EmbeddedVoiceSessionState& state,
+    const std::string& participantId) {
+    return !participantId.empty() &&
+           state.friendProfileIds.contains(participantId);
+}
+
+float manualVolumeFor(
+    const EmbeddedVoiceSessionState& state,
+    const std::string& participantId) {
+    if(const auto saved=state.savedPeerVolumes.find(participantId);
+       saved!=state.savedPeerVolumes.end()) {
+        return saved->second;
+    }
+    return 1.0f;
+}
+
+bool policyMutedFor(
+    const EmbeddedVoiceSessionState& state,
+    const std::string& participantId) {
+    const bool isFriend=isFriendProfile(state,participantId);
+    if(state.muteEveryone) return true;
+    if(state.muteOnlyFriends && isFriend) return true;
+    if(state.muteEveryoneButFriends && !isFriend) return true;
+    if(state.autoMutedNewParticipants.contains(participantId)) return true;
+    return false;
+}
+
+float effectiveVolumeFor(
+    const EmbeddedVoiceSessionState& state,
+    const std::string& participantId) {
+    return policyMutedFor(state,participantId)
+        ? 0.0f
+        : manualVolumeFor(state,participantId);
+}
+
+void applyRemoteVolumeForMember(
+    EmbeddedVoiceSessionState& state,
+    const std::string& memberId) {
+    if(!state.voiceClient || !state.voiceClient->hasPeer(memberId)) return;
+    const auto metadata=state.developmentPeers.find(memberId);
+    if(metadata==state.developmentPeers.end()) return;
+    state.voiceClient->setRemoteVolume(
+        memberId,
+        effectiveVolumeFor(state,metadata->second.participantId));
+}
+
+void applyAllRemoteVolumes(EmbeddedVoiceSessionState& state) {
+    if(!state.voiceClient) return;
+    for(const auto& [memberId,metadata]:state.developmentPeers) {
+        (void)metadata;
+        applyRemoteVolumeForMember(state,memberId);
+    }
 }
 
 bool pushToTalkHeld(const EmbeddedVoiceSessionState& state) noexcept {
@@ -437,6 +511,7 @@ void clearPeerRuntime(EmbeddedVoiceSessionState& state) {
     stopVoiceClient(state);
     state.peerLinks.clear();
     state.developmentPeers.clear();
+    state.autoMutedNewParticipants.clear();
     for(auto& player:state.status.roomPlayers) player.voiceChat=false;
     state.status.developmentPeerCount=0;
     state.status.peerCount=0;
@@ -629,11 +704,7 @@ void pollPeerLinks(EmbeddedVoiceSessionState& state) {
                     std::move(transport));
             }
 
-            if(const auto metadata=state.developmentPeers.find(memberId);metadata!=state.developmentPeers.end()) {
-                if(const auto saved=state.savedPeerVolumes.find(metadata->second.participantId);saved!=state.savedPeerVolumes.end()) {
-                    state.voiceClient->setRemoteVolume(memberId,saved->second);
-                }
-            }
+            applyRemoteVolumeForMember(state,memberId);
 
             state.status.status=
                 "UNVERIFIED dev P2P voice connected";
@@ -678,6 +749,16 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
         auto& state = voiceSessionState();
         std::lock_guard<std::mutex> lock(state.mutex);
         loadSettingsLocked(state);
+
+        std::unordered_set<std::string> incomingFriends;
+        incomingFriends.reserve(input.friendProfileIds.size());
+        for(const auto& profileId:input.friendProfileIds) {
+            if(!profileId.empty()) incomingFriends.insert(profileId);
+        }
+        if(incomingFriends!=state.friendProfileIds) {
+            state.friendProfileIds=std::move(incomingFriends);
+            applyAllRemoteVolumes(state);
+        }
 
         if(!state.enabled) {
             if(state.signaling || state.voiceClient || state.microphoneTestRuntime || state.status.lifecycleActive) {
@@ -842,12 +923,25 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
                         break;
                     }
 
+                    bool participantAlreadyPresent=false;
+                    for(const auto& [existingMember,existingMetadata]:state.developmentPeers) {
+                        (void)existingMember;
+                        if(existingMetadata.participantId==metadata.participantId) {
+                            participantAlreadyPresent=true;
+                            break;
+                        }
+                    }
+                    if(state.muteNewPlayers && !participantAlreadyPresent) {
+                        state.autoMutedNewParticipants.insert(metadata.participantId);
+                    }
+
                     if(auto* player=roomPlayer(state,metadata.participantId)) {
                         player->voiceChat=true;
                         if(!metadata.displayName.empty()) player->displayName=metadata.displayName;
                         if(!metadata.friendCode.empty()) player->friendCode=metadata.friendCode;
                     }
                     state.developmentPeers[memberId]=std::move(metadata);
+                    applyRemoteVolumeForMember(state,memberId);
                     state.status.developmentPeerCount=
                         static_cast<std::uint32_t>(
                             state.developmentPeers.size());
@@ -961,6 +1055,10 @@ EmbeddedVoiceControls embeddedVoiceControls() {
     EmbeddedVoiceControls controls;
     controls.enabled=state.enabled;
     controls.overlayVisible=state.overlayVisible;
+    controls.muteEveryone=state.muteEveryone;
+    controls.muteOnlyFriends=state.muteOnlyFriends;
+    controls.muteEveryoneButFriends=state.muteEveryoneButFriends;
+    controls.muteNewPlayers=state.muteNewPlayers;
     controls.inputDevices=state.inputDevices;
     controls.outputDevices=state.outputDevices;
     controls.inputDevice=state.inputDevice;
@@ -1003,7 +1101,13 @@ EmbeddedVoiceControls embeddedVoiceControls() {
                 control.displayName=found->second.displayName;
                 control.friendCode=found->second.friendCode;
             }
-            control.volume=peer.volume;
+            if(!control.participantId.empty()) {
+                control.volume=manualVolumeFor(state,control.participantId);
+                control.isFriend=isFriendProfile(state,control.participantId);
+                control.policyMuted=policyMutedFor(state,control.participantId);
+            } else {
+                control.volume=peer.volume;
+            }
             control.voicePeak=peer.voicePeak;
             control.speaking=peer.speaking;
             control.remoteMuted=peer.remoteMuted;
@@ -1063,6 +1167,38 @@ void setEmbeddedVoiceOverlayVisible(bool visible) {
     loadSettingsLocked(state);
     state.overlayVisible=visible;
     persistBool("overlay_visible",visible);
+}
+
+void setEmbeddedVoiceMutePolicy(
+    bool muteEveryone,
+    bool muteOnlyFriends,
+    bool muteEveryoneButFriends,
+    bool muteNewPlayers) {
+    auto& state=voiceSessionState();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    loadSettingsLocked(state);
+
+    if(muteEveryone) {
+        muteOnlyFriends=false;
+        muteEveryoneButFriends=false;
+        muteNewPlayers=false;
+    } else if(muteOnlyFriends && muteEveryoneButFriends) {
+        muteEveryoneButFriends=false;
+    }
+
+    state.muteEveryone=muteEveryone;
+    state.muteOnlyFriends=muteOnlyFriends;
+    state.muteEveryoneButFriends=muteEveryoneButFriends;
+    state.muteNewPlayers=muteNewPlayers;
+    if(!state.muteNewPlayers || state.muteEveryone) {
+        state.autoMutedNewParticipants.clear();
+    }
+
+    persistBool("mute_everyone",state.muteEveryone);
+    persistBool("mute_only_friends",state.muteOnlyFriends);
+    persistBool("mute_everyone_but_friends",state.muteEveryoneButFriends);
+    persistBool("mute_new_players",state.muteNewPlayers);
+    applyAllRemoteVolumes(state);
 }
 
 void refreshEmbeddedVoiceDevices() {
@@ -1309,10 +1445,12 @@ void setEmbeddedVoicePeerVolume(const std::string& memberId,float volume) {
     std::lock_guard<std::mutex> lock(state.mutex);
     loadSettingsLocked(state);
     const float clamped=std::clamp(volume,0.0f,3.0f);
-    if(state.voiceClient) state.voiceClient->setRemoteVolume(memberId,clamped);
     if(const auto found=state.developmentPeers.find(memberId);found!=state.developmentPeers.end()) {
         state.savedPeerVolumes[found->second.participantId]=clamped;
         persistFloat("peer_volume_"+found->second.participantId,clamped);
+        applyRemoteVolumeForMember(state,memberId);
+    } else if(state.voiceClient) {
+        state.voiceClient->setRemoteVolume(memberId,clamped);
     }
 }
 
