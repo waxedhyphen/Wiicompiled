@@ -51,6 +51,7 @@ struct RoomSnapshot {
     std::string roomId;
     std::string roomInstanceId;
     std::string created;
+    std::vector<std::string> localRoomProfileIds;
     std::vector<RoomPlayer> players;
     std::uint64_t identityGeneration = 0;
 };
