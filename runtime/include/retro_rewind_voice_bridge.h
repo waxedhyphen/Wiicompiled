@@ -8,6 +8,8 @@
 namespace RetroRewindVoiceBridge {
 
 inline constexpr const char* kMkwVoiceChatVersion = "0.14.0";
+inline constexpr const char* kMkwVoiceChatPatchRevision =
+    "voice-bridge-v30-rnnoise-stage4i";
 inline constexpr std::uint32_t kMkwVoiceChatProtocolVersion = 1;
 
 struct ReleaseStatus {
