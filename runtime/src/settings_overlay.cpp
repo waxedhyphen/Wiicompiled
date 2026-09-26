@@ -1082,7 +1082,7 @@ void ServiceVoiceHotkeys() {
 
 void DrawVoiceChatOverlay() {
     auto controls=mkwvc::embeddedVoiceControls();
-    if(!controls.enabled) return;
+    if(!controls.enabled || !controls.overlayVisible) return;
 
     const auto session=mkwvc::embeddedVoiceSessionStatus();
     ImGuiViewport* viewport=ImGui::GetMainViewport();
@@ -1090,9 +1090,14 @@ void DrawVoiceChatOverlay() {
 
     if(!controls.peers.empty()) {
         ImGui::SetNextWindowPos(
-            ImVec2(viewport->WorkPos.x+12.0f,viewport->WorkPos.y+90.0f),
-            ImGuiCond_Always);
-        ImGui::SetNextWindowBgAlpha(0.35f);
+            ImVec2(
+                viewport->WorkPos.x+viewport->WorkSize.x-12.0f,
+                viewport->WorkPos.y+viewport->WorkSize.y*0.5f),
+            ImGuiCond_Always,
+            ImVec2(1.0f,0.5f));
+        ImGui::SetNextWindowBgAlpha(0.28f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(5.0f,5.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ImVec2(4.0f,3.0f));
         const ImGuiWindowFlags flags=
             ImGuiWindowFlags_NoDecoration|
             ImGuiWindowFlags_AlwaysAutoResize|
@@ -1104,20 +1109,24 @@ void DrawVoiceChatOverlay() {
             for(const auto& peer:controls.peers) {
                 ImGui::PushID(peer.memberId.c_str());
                 const ImVec4 speakingBg=peer.speaking
-                    ? ImVec4(0.12f,0.48f,0.19f,0.82f)
-                    : ImVec4(0.07f,0.07f,0.07f,0.72f);
+                    ? ImVec4(0.12f,0.48f,0.19f,0.80f)
+                    : ImVec4(0.07f,0.07f,0.07f,0.66f);
                 ImGui::PushStyleColor(ImGuiCol_ChildBg,speakingBg);
                 ImGui::BeginChild(
                     "##VoicePeerOverlay",
-                    ImVec2(275.0f,56.0f),
+                    ImVec2(210.0f,42.0f),
                     true,
                     ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
 
+                ImGui::SetWindowFontScale(0.90f);
                 const std::string name=peer.displayName.empty()
                     ? (peer.participantId.empty() ? std::string("Player") : peer.participantId)
                     : peer.displayName;
-                if(peer.friendCode.empty()) ImGui::TextUnformatted(name.c_str());
-                else ImGui::Text("%s [%s]",name.c_str(),peer.friendCode.c_str());
+                ImGui::TextUnformatted(name.c_str());
+                if(!peer.friendCode.empty()) {
+                    ImGui::SameLine(0.0f,4.0f);
+                    ImGui::TextDisabled("[%s]",peer.friendCode.c_str());
+                }
 
                 if(peer.speaking) ImGui::TextUnformatted("SPEAKING");
                 else ImGui::TextDisabled("Silent");
@@ -1128,6 +1137,7 @@ void DrawVoiceChatOverlay() {
                     ImGui::SameLine();
                     ImGui::TextDisabled("| MUTED");
                 }
+                ImGui::SetWindowFontScale(1.0f);
 
                 ImGui::EndChild();
                 ImGui::PopStyleColor();
@@ -1135,6 +1145,7 @@ void DrawVoiceChatOverlay() {
             }
         }
         ImGui::End();
+        ImGui::PopStyleVar(2);
     }
 
     std::string status;
@@ -1151,7 +1162,12 @@ void DrawVoiceChatOverlay() {
                viewport->WorkPos.y+viewport->WorkSize.y-18.0f),
         ImGuiCond_Always,
         ImVec2(1.0f,1.0f));
-    ImGui::SetNextWindowBgAlpha(0.55f);
+    ImGui::SetNextWindowBgAlpha(0.78f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(12.0f,8.0f));
+    const bool alert=controls.microphoneMuted || controls.deafened;
+    if(alert) {
+        ImGui::PushStyleColor(ImGuiCol_WindowBg,ImVec4(0.55f,0.05f,0.05f,0.92f));
+    }
     const ImGuiWindowFlags localFlags=
         ImGuiWindowFlags_NoDecoration|
         ImGuiWindowFlags_AlwaysAutoResize|
@@ -1160,13 +1176,16 @@ void DrawVoiceChatOverlay() {
         ImGuiWindowFlags_NoNav|
         ImGuiWindowFlags_NoInputs;
     if(ImGui::Begin("##VoiceChatLocalStatus",nullptr,localFlags)) {
-        ImGui::SetWindowFontScale(1.25f);
+        ImGui::SetWindowFontScale(1.55f);
         ImGui::TextUnformatted(status.c_str());
-        ImGui::SetWindowFontScale(1.0f);
+        ImGui::SetWindowFontScale(1.05f);
         ImGui::TextDisabled("%s",
             session.signalingConnected ? "Voice connected" : "Voice waiting");
+        ImGui::SetWindowFontScale(1.0f);
     }
     ImGui::End();
+    if(alert) ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
 }
 
 void DrawVoiceChatSettings() {
@@ -1205,7 +1224,7 @@ void DrawVoiceChatSettings() {
     };
 
     ImGui::TextUnformatted("Retro Rewind voice integration");
-    ImGui::TextDisabled("Integration: voice-bridge-v19-mic-monitor-device-fix-stage4c");
+    ImGui::TextDisabled("Integration: voice-bridge-v20-overlay-audio-stage4c");
 
     const std::string localName=playerNameFor(identity.profileId);
     const std::string localFriendCode=playerFriendCodeFor(identity.profileId);
@@ -1329,6 +1348,12 @@ void DrawVoiceChatSettings() {
         std::clamp(static_cast<float>(controls.micPeak)/32768.0f,0.0f,1.0f),
         ImVec2(-1.0f,20.0f),
         controls.localSpeaking ? "Speaking" : "");
+
+    bool overlayVisible=controls.overlayVisible;
+    if(ImGui::Checkbox("Show Voice Chat overlay",&overlayVisible)) {
+        mkwvc::setEmbeddedVoiceOverlayVisible(overlayVisible);
+        controls=mkwvc::embeddedVoiceControls();
+    }
 
     if(ImGui::CollapsingHeader("Advanced")) {
         ImGui::Indent();
@@ -1475,8 +1500,11 @@ void DrawVoiceChatSettings() {
             ImGui::TableNextColumn();
             const std::string peerName=peer.displayName.empty() ? playerNameFor(peer.participantId) : peer.displayName;
             const std::string peerFriendCode=peer.friendCode.empty() ? playerFriendCodeFor(peer.participantId) : peer.friendCode;
-            if(peerFriendCode.empty()) ImGui::TextUnformatted(peerName.c_str());
-            else ImGui::Text("%s [%s]",peerName.c_str(),peerFriendCode.c_str());
+            ImGui::TextUnformatted(peerName.c_str());
+            if(!peerFriendCode.empty()) {
+                ImGui::SameLine(0.0f,4.0f);
+                ImGui::TextDisabled("[%s]",peerFriendCode.c_str());
+            }
 
             ImGui::TableNextColumn();
             if(peer.remoteDeafened) ImGui::TextUnformatted("Deafened");
@@ -1505,13 +1533,16 @@ void DrawVoiceChatSettings() {
     if(room.roomFound) {
         ImGui::TextDisabled("Retro Rewind room: %zu player%s",room.players.size(),room.players.size()==1 ? "" : "s");
         for(const auto& player:room.players) {
-            if(player.friendCode.empty()) {
-                ImGui::BulletText("%s%s",player.name.c_str(),player.voiceChat ? " [Voice Chat]" : "");
-            } else {
-                ImGui::BulletText("%s [%s]%s",
-                                  player.name.c_str(),
-                                  player.friendCode.c_str(),
-                                  player.voiceChat ? " [Voice Chat]" : "");
+            ImGui::Bullet();
+            ImGui::SameLine();
+            ImGui::TextUnformatted(player.name.c_str());
+            if(!player.friendCode.empty()) {
+                ImGui::SameLine(0.0f,4.0f);
+                ImGui::TextDisabled("[%s]",player.friendCode.c_str());
+            }
+            if(player.voiceChat) {
+                ImGui::SameLine(0.0f,4.0f);
+                ImGui::TextDisabled("[Voice Chat]");
             }
         }
     }
