@@ -1771,6 +1771,14 @@ void DrawVoiceChatSettings() {
         ImGui::Text("Local RKNet room: %s",room.localRoomActive ? "Active" : "Inactive");
         ImGui::Text("Signaling socket: %s",room.signalingConnected ? "Connected" : "Not connected");
         ImGui::Text("Lookup: %s",room.status.empty() ? "-" : room.status.c_str());
+        std::string localRoomPids;
+        for(std::size_t i=0;i<room.localRoomProfileIds.size();++i) {
+            if(i>0) localRoomPids+=", ";
+            localRoomPids+=room.localRoomProfileIds[i];
+        }
+        ImGui::TextWrapped(
+            "Local RKNet PIDs: %s",
+            localRoomPids.empty() ? "-" : localRoomPids.c_str());
         ImGui::Text("Room ID: %s",room.roomId.empty() ? "-" : room.roomId.c_str());
         ImGui::Text("Room instance: %s",room.roomInstanceId.empty() ? "-" : room.roomInstanceId.c_str());
 
