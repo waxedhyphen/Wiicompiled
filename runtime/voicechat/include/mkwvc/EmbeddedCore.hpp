@@ -21,6 +21,7 @@ struct EmbeddedVoiceSessionInput {
     std::string sessionKey;
     std::string gameName;
     std::vector<std::string> friendProfileIds;
+    std::vector<std::string> roomProfileIds;
     bool teamModeActive = false;
     std::vector<std::string> teamProfileIds;
     std::vector<std::string> teammateProfileIds;
