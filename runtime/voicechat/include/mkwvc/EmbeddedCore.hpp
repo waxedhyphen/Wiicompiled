@@ -75,6 +75,7 @@ struct EmbeddedVoicePeerControl {
 
 struct EmbeddedVoiceControls {
     bool enabled = false;
+    bool overlayVisible = true;
     std::vector<std::string> inputDevices;
     std::vector<std::string> outputDevices;
     std::string inputDevice;
@@ -114,6 +115,7 @@ void serviceEmbeddedVoiceSession(const EmbeddedVoiceSessionInput& input) noexcep
 EmbeddedVoiceSessionStatus embeddedVoiceSessionStatus();
 EmbeddedVoiceControls embeddedVoiceControls();
 void setEmbeddedVoiceEnabled(bool enabled);
+void setEmbeddedVoiceOverlayVisible(bool visible);
 void refreshEmbeddedVoiceDevices();
 void setEmbeddedVoiceInputDevice(std::string device);
 void setEmbeddedVoiceOutputDevice(std::string device);
