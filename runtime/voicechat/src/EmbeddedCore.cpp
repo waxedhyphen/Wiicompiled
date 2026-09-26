@@ -89,6 +89,7 @@ struct EmbeddedVoiceSessionState {
     float microphoneGain=1.0f;
     float playbackVolume=1.0f;
     bool enabled=false;
+    bool overlayVisible=true;
     bool microphoneMuted=false;
     bool deafened=false;
     bool pushToTalk=false;
@@ -158,6 +159,7 @@ void loadSettingsLocked(EmbeddedVoiceSessionState& state) {
                     voiceTable.find("ptt_controller")!=voiceTable.end();
             }
             if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","enabled")) state.enabled=*value;
+            if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","overlay_visible")) state.overlayVisible=*value;
             if(const auto value=RuntimeConfigFile::FindConfigValue<std::string>(document,"voicechat","input_device")) state.inputDevice=*value;
             if(const auto value=RuntimeConfigFile::FindConfigValue<std::string>(document,"voicechat","output_device")) state.outputDevice=*value;
             if(const auto value=RuntimeConfigFile::FindConfigValue<bool>(document,"voicechat","normalization")) state.audioProcessing.normalization=*value;
@@ -958,6 +960,7 @@ EmbeddedVoiceControls embeddedVoiceControls() {
 
     EmbeddedVoiceControls controls;
     controls.enabled=state.enabled;
+    controls.overlayVisible=state.overlayVisible;
     controls.inputDevices=state.inputDevices;
     controls.outputDevices=state.outputDevices;
     controls.inputDevice=state.inputDevice;
@@ -1052,6 +1055,14 @@ void setEmbeddedVoiceEnabled(bool enabled) {
         persistString("output_device",{});
     }
     state.status.status="Enabled; waiting for Retro Rewind room";
+}
+
+void setEmbeddedVoiceOverlayVisible(bool visible) {
+    auto& state=voiceSessionState();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    loadSettingsLocked(state);
+    state.overlayVisible=visible;
+    persistBool("overlay_visible",visible);
 }
 
 void refreshEmbeddedVoiceDevices() {
